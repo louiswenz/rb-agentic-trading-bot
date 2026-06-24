@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""Readiness checks for the Agentic trading automation artifacts."""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+import tomllib
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+OUTPUTS = ROOT / "outputs"
+WORK = ROOT / "work"
+AUTOMATIONS = pathlib.Path.home() / ".codex" / "automations"
+
+
+def load_json(path: pathlib.Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def load_toml(path: pathlib.Path) -> dict:
+    with path.open("rb") as handle:
+        return tomllib.load(handle)
+
+
+def check(name: str, passed: bool, detail: str) -> dict:
+    return {"name": name, "passed": bool(passed), "detail": detail}
+
+
+def main() -> int:
+    config_path = OUTPUTS / "strategy_config.json"
+    state_path = WORK / "agentic_live_adapter_state.json"
+    live_auto_path = AUTOMATIONS / "daily-agentic-account-scan" / "automation.toml"
+    morning_auto_path = AUTOMATIONS / "agentic-morning-bot-run" / "automation.toml"
+    codex_config_path = pathlib.Path.home() / ".codex" / "config.toml"
+
+    config = load_json(config_path)
+    state = load_json(state_path)
+    live_auto = load_toml(live_auto_path)
+    morning_auto = load_toml(morning_auto_path)
+    codex_config = load_toml(codex_config_path)
+
+    required_files = [
+        OUTPUTS / "agentic_monitor.py",
+        OUTPUTS / "swing_strategy.py",
+        OUTPUTS / "live_trading_bot.py",
+        OUTPUTS / "broker_adapters.py",
+        OUTPUTS / "test_agentic_monitor.py",
+        OUTPUTS / "test_swing_strategy_news.py",
+        OUTPUTS / "codex_robinhood_adapter_runbook.md",
+        OUTPUTS / "codex_live_orchestrator_prompt.md",
+        OUTPUTS / "agentic_live_readiness_audit.md",
+        OUTPUTS / "strategy_config.json",
+        state_path,
+    ]
+
+    prompt = str(live_auto.get("prompt", ""))
+    live_rrule = str(live_auto["rrule"])
+    morning_prompt = str(morning_auto.get("prompt", ""))
+    morning_rrule = str(morning_auto["rrule"])
+    robinhood_tools = codex_config["mcp_servers"]["robinhood"]["tools"]
+    required_robinhood_approvals = [
+        "get_accounts",
+        "get_portfolio",
+        "get_equity_positions",
+        "get_equity_orders",
+        "get_equity_quotes",
+        "get_index_quotes",
+        "get_equity_historicals",
+        "get_equity_tradability",
+        "get_option_positions",
+        "review_equity_order",
+        "place_equity_order",
+        "cancel_equity_order",
+    ]
+
+    checks = [
+        check(
+            "required_files",
+            all(path.exists() for path in required_files),
+            f"{sum(path.exists() for path in required_files)}/{len(required_files)} files present",
+        ),
+        check(
+            "auto_trading_mode",
+            config["execution"]["mode"] == "auto_trade_with_notifications",
+            config["execution"]["mode"],
+        ),
+        check(
+            "max_auto_buys_per_day",
+            config["execution"]["max_auto_buys_per_day"] == 2,
+            str(config["execution"]["max_auto_buys_per_day"]),
+        ),
+        check(
+            "news_filter_enabled",
+            config["strategy"].get("news_filter", {}).get("enabled") is True,
+            str(config["strategy"].get("news_filter", {}).get("enabled")),
+        ),
+        check(
+            "normal_monitoring_interval",
+            config["monitoring"]["open_position_poll_seconds"] == 900,
+            f"{config['monitoring']['open_position_poll_seconds']} seconds",
+        ),
+        check(
+            "elevated_monitoring_interval",
+            config["monitoring"]["elevated_poll_seconds"] == 60,
+            f"{config['monitoring']['elevated_poll_seconds']} seconds",
+        ),
+        check(
+            "market_hours_only_schedule_mode",
+            config["monitoring"].get("schedule_mode") == "regular_market_hours_only",
+            str(config["monitoring"].get("schedule_mode")),
+        ),
+        check(
+            "premarket_candidate_scan_time",
+            config["monitoring"].get("premarket_candidate_scan_time_pt") == "06:00",
+            str(config["monitoring"].get("premarket_candidate_scan_time_pt")),
+        ),
+        check(
+            "standing_authorization_state",
+            state["standing_authorization"] is True,
+            str(state["standing_authorization"]),
+        ),
+        check(
+            "codex_orchestrated_live_mode",
+            state["live_mode"] == "codex_orchestrated",
+            state["live_mode"],
+        ),
+        check(
+            "broker_mcp_verified",
+            state.get("broker_mcp_status") == "verified",
+            str(state.get("broker_mcp_status")),
+        ),
+        check(
+            "verified_account_snapshot",
+            state.get("last_verified_snapshot", {}).get("buying_power") == 2000.0
+            and state.get("last_verified_snapshot", {}).get("equity_positions_count") == 0
+            and state.get("last_verified_snapshot", {}).get("open_equity_orders_count") == 0,
+            str(state.get("last_verified_snapshot", {})),
+        ),
+        check(
+            "robinhood_mcp_enabled",
+            codex_config["mcp_servers"]["robinhood"]["enabled"] is True,
+            "enabled",
+        ),
+        check(
+            "robinhood_required_tool_approvals",
+            all(robinhood_tools.get(tool, {}).get("approval_mode") == "approve" for tool in required_robinhood_approvals),
+            f"{sum(robinhood_tools.get(tool, {}).get('approval_mode') == 'approve' for tool in required_robinhood_approvals)}/{len(required_robinhood_approvals)} approvals",
+        ),
+        check(
+            "live_automation_active",
+            live_auto["status"] == "ACTIVE",
+            live_auto["status"],
+        ),
+        check(
+            "live_automation_15_minute_heartbeat",
+            live_auto["kind"] == "heartbeat"
+            and "FREQ=WEEKLY" in live_rrule
+            and "BYDAY=MO,TU,WE,TH,FR" in live_rrule
+            and "BYHOUR=6,7,8,9,10,11,12,13" in live_rrule
+            and "BYMINUTE=0,15,30,45" in live_rrule,
+            live_rrule,
+        ),
+        check(
+            "live_prompt_uses_private_state",
+            "work/agentic_live_adapter_state.json" in prompt,
+            "private state path referenced",
+        ),
+        check(
+            "live_prompt_requires_robinhood_tools",
+            "Robinhood" in prompt and "place" in prompt and "cancel" in prompt,
+            "broker execution language present",
+        ),
+        check(
+            "live_prompt_requires_news_filter",
+            "latest stock-specific news" in prompt and "--news-json" in prompt,
+            "news-aware candidate language present",
+        ),
+        check(
+            "premarket_candidate_scan_active",
+            morning_auto["status"] == "ACTIVE"
+            and morning_auto["kind"] == "cron"
+            and "BYHOUR=6" in morning_rrule
+            and "BYMINUTE=0" in morning_rrule,
+            f"{morning_auto['status']} {morning_rrule}",
+        ),
+        check(
+            "premarket_prompt_pending_candidates_only",
+            "pending candidates only" in morning_prompt and "must not review, place, cancel, or modify any order" in morning_prompt,
+            "premarket scan is non-ordering",
+        ),
+    ]
+
+    passed = all(item["passed"] for item in checks)
+    print(json.dumps({"passed": passed, "checks": checks}, indent=2))
+    return 0 if passed else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

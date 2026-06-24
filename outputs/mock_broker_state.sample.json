@@ -1,0 +1,21 @@
+{
+  "account": {
+    "equity": 2000.0,
+    "buying_power": 2000.0,
+    "positions": []
+  },
+  "orders": [],
+  "quotes": {
+    "QQQ": {
+      "price": 138.8,
+      "trend_score": 0.5
+    },
+    "SPY": {
+      "price": 600.0,
+      "trend_score": 1.0
+    },
+    "VIX": {
+      "price": 18.0
+    }
+  }
+}

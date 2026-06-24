@@ -1,0 +1,13 @@
+{
+  "trading_date": null,
+  "status": "ready",
+  "paused_reason": null,
+  "daily_buy_count": 0,
+  "start_of_day_equity": null,
+  "last_account_snapshot": null,
+  "position": null,
+  "pending_candidates": [],
+  "open_orders": [],
+  "last_events": [],
+  "strategy_overrides": {}
+}

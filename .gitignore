@@ -1,0 +1,11 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Runtime/live trading state, broker snapshots, and generated market data.
+work/
+
+# Keep templates and source code under version control.
+!outputs/*.json
+!outputs/*.sample.json
+!outputs/*.template.json

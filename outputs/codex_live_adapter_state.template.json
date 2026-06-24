@@ -1,0 +1,36 @@
+{
+  "standing_authorization": true,
+  "authorization_scope": {
+    "auto_buys": true,
+    "auto_protective_stops": true,
+    "auto_profit_sells": true,
+    "auto_stop_cancel_replace": true,
+    "max_auto_buys_per_day": 2,
+    "max_position_pct": 50.0,
+    "max_planned_risk_pct": 4.0,
+    "daily_loss_stop_pct": 5.0,
+    "one_open_position_under_5000": true
+  },
+  "account_selector": {
+    "nickname": "Agentic",
+    "masked_account": "••••6332",
+    "brokerage_account_type": "individual",
+    "account_type": "cash",
+    "agentic_allowed": true
+  },
+  "agentic_account_number": "",
+  "masked_account": "••••6332",
+  "live_mode": "codex_orchestrated",
+  "last_orchestrator_run": null,
+  "heartbeat_cadence_seconds": 900,
+  "daily_buy_count": 0,
+  "start_of_day_equity": null,
+  "active_position": null,
+  "protective_stop_order_id": null,
+  "profit_order_id": null,
+  "last_equity_order_ids": [],
+  "last_ref_ids": [],
+  "pending_candidates": [],
+  "manual_activity_detected": false,
+  "paused_reason": null
+}
