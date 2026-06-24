@@ -25,6 +25,7 @@ import csv
 import json
 import math
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,10 @@ class Candidate:
     position_value: float
     max_loss: float
     buying_power_impact: float
+    partial_target: float
+    profit_target: float
+    reward_risk_ratio: float
+    sector_group: str
     relative_strength_pct: float
     news_score: float
     combined_rank_score: float
@@ -101,6 +106,12 @@ def percent_change(new: float, old: float) -> float:
     return ((new - old) / old) * 100.0
 
 
+def percent_distance(high: float, low: float) -> float:
+    if high == 0:
+        return 0.0
+    return ((high - low) / high) * 100.0
+
+
 def has_pullback_or_consolidation(bars: list[Bar], lookback: int) -> bool:
     if len(bars) < lookback + 1:
         return False
@@ -121,12 +132,15 @@ def position_size(
     stop: float,
     risk_per_trade_pct: float,
     max_position_pct: float,
+    max_trade_risk_dollars: float | None = None,
 ) -> tuple[int, float, float]:
     risk_per_share = max(entry - stop, 0.0)
     if risk_per_share <= 0:
         return 0, 0.0, 0.0
 
     max_risk_dollars = account_value * (risk_per_trade_pct / 100.0)
+    if max_trade_risk_dollars is not None:
+        max_risk_dollars = min(max_risk_dollars, max_trade_risk_dollars)
     risk_sized_shares = math.floor(max_risk_dollars / risk_per_share)
     cap_sized_shares = math.floor((account_value * (max_position_pct / 100.0)) / entry)
     cash_sized_shares = math.floor(settled_cash / entry)
@@ -140,8 +154,8 @@ def max_next_session_entry(signal_close: float, max_gap_pct: float) -> float:
     return signal_close * (1.0 + max_gap_pct / 100.0)
 
 
-def profit_target_price(entry: float, target_pct: float) -> float:
-    return entry * (1.0 + target_pct / 100.0)
+def r_multiple_target(entry: float, stop: float, multiple: float) -> float:
+    return entry + ((entry - stop) * multiple)
 
 
 def load_news_snapshot(path_or_json: str | None) -> dict[str, Any]:
@@ -167,7 +181,72 @@ def parse_symbol_set(value: str | None) -> set[str]:
     return {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
 
 
-def normalize_news_item(symbol: str, news_snapshot: dict[str, Any], config: dict[str, Any]) -> tuple[bool, float, str]:
+def parse_float_arg(value: str | None, default: float = 0.0) -> float:
+    if value is None or value == "":
+        return default
+    return float(value)
+
+
+def symbol_group(symbol: str, config: dict[str, Any]) -> str:
+    groups = config["strategy"].get("sector_concentration", {}).get("symbol_groups", {})
+    return str(groups.get(symbol.upper(), "other"))
+
+
+def held_group_counts(held_symbols: set[str], config: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for symbol in held_symbols:
+        group = symbol_group(symbol, config)
+        counts[group] = counts.get(group, 0) + 1
+    return counts
+
+
+def max_positions_per_group(account_value: float, config: dict[str, Any]) -> int:
+    concentration = config["strategy"].get("sector_concentration", {})
+    risk = config["risk"]
+    if account_value < float(risk["funding_minimum_standard_usd"]):
+        return int(concentration.get("max_positions_per_group_under_5000", 1))
+    return int(concentration.get("max_positions_per_group_standard", 1))
+
+
+def earnings_blackout_reason(item: dict[str, Any], signal_date: str, config: dict[str, Any]) -> str | None:
+    blackout_days = int(config["strategy"].get("earnings_blackout_days", 0))
+    if blackout_days <= 0:
+        return None
+
+    if item.get("days_until_earnings") is not None:
+        days_until = int(item["days_until_earnings"])
+        if 0 <= days_until <= blackout_days:
+            return f"earnings within {days_until} trading days"
+
+    next_earnings_date = item.get("next_earnings_date") or item.get("earnings_date")
+    if next_earnings_date:
+        days_until = (date.fromisoformat(str(next_earnings_date)) - date.fromisoformat(signal_date)).days
+        if 0 <= days_until <= blackout_days:
+            return f"earnings on {next_earnings_date}"
+    return None
+
+
+def adaptive_gap_pct(relative_strength: float, news_score: float, config: dict[str, Any]) -> float:
+    strategy = config["strategy"]
+    adaptive = strategy.get("adaptive_gap", {})
+    if not adaptive.get("enabled", False):
+        return float(strategy["next_session_max_gap_pct"])
+    if news_score <= float(strategy.get("news_filter", {}).get("block_below_score", -2.0)):
+        return float(adaptive["weak_or_risk_off_pct"])
+    if (
+        relative_strength >= float(adaptive["strong_relative_strength_pct"])
+        and news_score >= float(adaptive["strong_news_score"])
+    ):
+        return float(adaptive["strong_setup_pct"])
+    return float(adaptive["default_pct"])
+
+
+def normalize_news_item(
+    symbol: str,
+    news_snapshot: dict[str, Any],
+    config: dict[str, Any],
+    signal_date: str,
+) -> tuple[bool, float, str]:
     news_config = config["strategy"].get("news_filter", {})
     if not news_config.get("enabled", False):
         return True, 0.0, "news filter disabled"
@@ -180,6 +259,9 @@ def normalize_news_item(symbol: str, news_snapshot: dict[str, Any], config: dict
 
     summary = str(item.get("summary") or item.get("headline") or "recent news reviewed")
     score = float(item.get("sentiment_score", item.get("score", 0.0)))
+    blackout_reason = earnings_blackout_reason(item, signal_date, config)
+    if blackout_reason:
+        return False, score, f"earnings blackout: {blackout_reason}"
     lower_text = " ".join(
         [
             summary,
@@ -205,6 +287,7 @@ def scan_symbol(
     settled_cash: float,
     config: dict[str, Any],
     news_snapshot: dict[str, Any] | None = None,
+    max_trade_risk_dollars: float | None = None,
 ) -> Candidate | None:
     strategy = config["strategy"]
     risk = config["risk"]
@@ -255,7 +338,15 @@ def scan_symbol(
     recent_low = min(bar.low for bar in bars[-swing_days:])
     percent_stop = latest.close * (1.0 - float(risk["initial_stop_pct"]) / 100.0)
     stop = min(percent_stop, recent_low)
-    max_entry = max_next_session_entry(latest.close, float(strategy["next_session_max_gap_pct"]))
+    stop_distance_pct = percent_distance(latest.close, stop)
+    if stop_distance_pct < float(risk["min_stop_pct"]) or stop_distance_pct > float(risk["max_stop_pct"]):
+        return None
+
+    news_ok, news_score, news_summary = normalize_news_item(symbol, news_snapshot or {}, config, latest.date)
+    if not news_ok:
+        return None
+
+    max_entry = max_next_session_entry(latest.close, adaptive_gap_pct(relative_strength, news_score, config))
     shares, position_value, max_loss = position_size(
         account_value=account_value,
         settled_cash=settled_cash,
@@ -263,12 +354,15 @@ def scan_symbol(
         stop=stop,
         risk_per_trade_pct=float(risk["risk_per_trade_pct"]),
         max_position_pct=float(risk["max_position_pct"]),
+        max_trade_risk_dollars=max_trade_risk_dollars,
     )
     if shares < 1:
         return None
 
-    news_ok, news_score, news_summary = normalize_news_item(symbol, news_snapshot or {}, config)
-    if not news_ok:
+    partial_target = r_multiple_target(latest.close, stop, float(risk["partial_profit_r_multiple"]))
+    profit_target = r_multiple_target(latest.close, stop, float(risk["synthetic_profit_target_r_multiple"]))
+    reward_risk_ratio = (profit_target - latest.close) / (latest.close - stop)
+    if reward_risk_ratio < float(strategy["min_reward_risk_ratio"]):
         return None
     news_weight = float(strategy.get("news_filter", {}).get("rank_weight", 0.0))
     combined_rank_score = relative_strength + (news_score * news_weight)
@@ -281,7 +375,8 @@ def scan_symbol(
         reason = f"{reason}; news score {news_score:g} ({news_summary})"
     exit_plan = (
         f"initial stop {stop:.2f}; consider partial profit at "
-        f"{profit_target_price(latest.close, float(risk['synthetic_profit_target_pct'])):.2f}; "
+        f"{partial_target:.2f} (1R); target {profit_target:.2f} "
+        f"({float(risk['synthetic_profit_target_r_multiple']):g}R); "
         f"trail remainder by {float(risk['trailing_stop_pct']):g}% or a close below the 20-day average"
     )
     return Candidate(
@@ -294,6 +389,10 @@ def scan_symbol(
         position_value=position_value,
         max_loss=max_loss,
         buying_power_impact=position_value,
+        partial_target=partial_target,
+        profit_target=profit_target,
+        reward_risk_ratio=reward_risk_ratio,
+        sector_group=symbol_group(symbol, config),
         relative_strength_pct=relative_strength,
         news_score=news_score,
         combined_rank_score=combined_rank_score,
@@ -346,6 +445,7 @@ def revalidate_candidate(
     account_value: float,
     settled_cash: float,
     config: dict[str, Any],
+    max_trade_risk_dollars: float | None = None,
 ) -> Candidate | None:
     risk = config["risk"]
     if live_price > candidate.max_entry:
@@ -358,13 +458,20 @@ def revalidate_candidate(
         stop=candidate.stop,
         risk_per_trade_pct=float(risk["risk_per_trade_pct"]),
         max_position_pct=float(risk["max_position_pct"]),
+        max_trade_risk_dollars=max_trade_risk_dollars,
     )
     if shares < 1:
+        return None
+    partial_target = r_multiple_target(live_price, candidate.stop, float(risk["partial_profit_r_multiple"]))
+    profit_target = r_multiple_target(live_price, candidate.stop, float(risk["synthetic_profit_target_r_multiple"]))
+    reward_risk_ratio = (profit_target - live_price) / (live_price - candidate.stop)
+    if reward_risk_ratio < float(config["strategy"]["min_reward_risk_ratio"]):
         return None
 
     exit_plan = (
         f"initial stop {candidate.stop:.2f}; consider partial profit at "
-        f"{profit_target_price(live_price, float(risk['synthetic_profit_target_pct'])):.2f}; "
+        f"{partial_target:.2f} (1R); target {profit_target:.2f} "
+        f"({float(risk['synthetic_profit_target_r_multiple']):g}R); "
         f"trail remainder by {float(risk['trailing_stop_pct']):g}% or a close below the 20-day average"
     )
 
@@ -378,6 +485,10 @@ def revalidate_candidate(
         position_value=position_value,
         max_loss=max_loss,
         buying_power_impact=position_value,
+        partial_target=partial_target,
+        profit_target=profit_target,
+        reward_risk_ratio=reward_risk_ratio,
+        sector_group=candidate.sector_group,
         relative_strength_pct=candidate.relative_strength_pct,
         news_score=candidate.news_score,
         combined_rank_score=candidate.combined_rank_score,
@@ -404,6 +515,11 @@ def main() -> int:
         "--held-symbols",
         default="",
         help="Comma-separated symbols or JSON array already held; held symbols are excluded from new-buy candidates.",
+    )
+    parser.add_argument(
+        "--open-risk-dollars",
+        default="0",
+        help="Current planned open-position risk in dollars; new trades must stay within total open-risk cap.",
     )
     parser.add_argument(
         "--live-prices",
@@ -437,6 +553,7 @@ def main() -> int:
     live_prices = json.loads(args.live_prices) if args.live_prices else {}
     news_snapshot = load_news_snapshot(args.news_json)
     held_symbols = parse_symbol_set(args.held_symbols)
+    open_risk_dollars = parse_float_arg(args.open_risk_dollars)
     if strategy.get("news_filter", {}).get("enabled", False):
         output["messages"].append(
             f"News filter active: latest symbol news is scored over the last "
@@ -460,6 +577,16 @@ def main() -> int:
         output["messages"].append("New trades blocked: maximum open positions reached.")
         return emit(output, args.json)
 
+    total_open_risk_cap = args.account_value * (float(risk["total_open_risk_pct"]) / 100.0)
+    remaining_open_risk = total_open_risk_cap - open_risk_dollars
+    if remaining_open_risk <= 0:
+        output["status"] = "risk_budget_full"
+        output["messages"].append("New trades blocked: total open-risk budget reached.")
+        return emit(output, args.json)
+    output["messages"].append(
+        f"Open-risk budget: ${remaining_open_risk:.2f} remaining of ${total_open_risk_cap:.2f} total cap."
+    )
+
     benchmark = strategy["benchmark_symbol"]
     spy_bars = load_bars(prices_dir / f"{benchmark}.csv")
     spy_sma50 = sma([bar.close for bar in spy_bars], int(strategy["market_filter_sma_days"]))
@@ -474,11 +601,18 @@ def main() -> int:
 
     candidates: list[Candidate] = []
     slots = max_positions - args.positions_count
+    held_groups = held_group_counts(held_symbols, config)
+    max_group_positions = max_positions_per_group(args.account_value, config)
     for symbol in symbols:
         if symbol == benchmark:
             continue
         if symbol.upper() in held_symbols:
             output["messages"].append(f"{symbol} skipped: already held.")
+            continue
+        group = symbol_group(symbol, config)
+        concentration = strategy.get("sector_concentration", {})
+        if concentration.get("enabled", False) and held_groups.get(group, 0) >= max_group_positions:
+            output["messages"].append(f"{symbol} skipped: {group} exposure already at group cap.")
             continue
         path = prices_dir / f"{symbol}.csv"
         if not path.exists():
@@ -492,6 +626,7 @@ def main() -> int:
             args.settled_cash,
             config,
             news_snapshot,
+            remaining_open_risk,
         )
         if candidate:
             candidates.append(candidate)
@@ -510,6 +645,7 @@ def main() -> int:
                 args.account_value,
                 args.settled_cash,
                 config,
+                remaining_open_risk,
             )
             if updated:
                 revalidated.append(updated)
@@ -534,6 +670,10 @@ def main() -> int:
             "position_value": round(item.position_value, 2),
             "max_loss": round(item.max_loss, 2),
             "buying_power_impact": round(item.buying_power_impact, 2),
+            "sector_group": item.sector_group,
+            "partial_target": round(item.partial_target, 2),
+            "target_price": round(item.profit_target, 2),
+            "reward_risk_ratio": round(item.reward_risk_ratio, 2),
             "relative_strength_pct": round(item.relative_strength_pct, 2),
             "news_score": round(item.news_score, 2),
             "news_summary": item.news_summary,
@@ -553,8 +693,10 @@ def main() -> int:
             },
             "synthetic_profit_target": {
                 "enabled": bool(config["execution"]["auto_monitor_synthetic_profit_target"]),
-                "target_price": round(profit_target_price(item.entry, float(risk["synthetic_profit_target_pct"])), 2),
-                "target_pct": float(risk["synthetic_profit_target_pct"]),
+                "partial_target_price": round(item.partial_target, 2),
+                "partial_target_r_multiple": float(risk["partial_profit_r_multiple"]),
+                "target_price": round(item.profit_target, 2),
+                "target_r_multiple": float(risk["synthetic_profit_target_r_multiple"]),
                 "monitoring_mode": risk["profit_target_mode"],
                 "order_type": risk["profit_target_order_type"],
                 "default_action": risk["profit_target_default_action"],
@@ -604,6 +746,11 @@ def emit(output: dict[str, Any], as_json: bool) -> int:
         print(f"  Position value: ${item['position_value']} | Max loss: ${item['max_loss']}")
         print(f"  Buying-power impact: ${item['buying_power_impact']}")
         print(
+            f"  Risk/reward: {item['reward_risk_ratio']}R | "
+            f"Partial target: {item['partial_target']} | Full target: {item['target_price']} | "
+            f"Group: {item['sector_group']}"
+        )
+        print(
             f"  Rank inputs: RS {item['relative_strength_pct']}% | "
             f"News {item['news_score']} | Combined {item['combined_rank_score']}"
         )
@@ -622,8 +769,9 @@ def emit(output: dict[str, Any], as_json: bool) -> int:
         if target["enabled"]:
             print(
                 "  Profit target: "
+                f"partial at {target['partial_target_price']} ({target['partial_target_r_multiple']:g}R), "
                 f"synthetic monitor at {target['target_price']} "
-                f"({target['target_pct']:g}%); action {target['default_action']}"
+                f"({target['target_r_multiple']:g}R); action {target['default_action']}"
             )
         if item["requires_user_confirmation"]:
             print("  Order status: requires explicit user confirmation before any placement")

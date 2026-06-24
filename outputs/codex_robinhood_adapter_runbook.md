@@ -8,13 +8,17 @@ Live automation is authorized only within these hard caps:
 
 - Agentic account only.
 - Max 2 automatic new buys per trading day.
-- Under $5,000 account value: max 1 open position.
+- Under $5,000 account value: max 2 open positions.
 - Max 50% account exposure per position.
 - Max 4% planned risk per trade.
+- Max 6% planned risk across all open positions.
+- Minimum 1.5R reward/risk for new buys.
+- One position per sector/group under $5,000; do not open a second airline/travel-equivalent trade while one is already held.
+- Earnings blackout blocks new buys when supplied news data shows earnings within 5 trading days.
 - Pause new buys at 5% daily drawdown from start-of-day equity.
 - Limit buy orders only.
 - Stop-market GTC protective sell after every buy fill.
-- Synthetic profit target only unless native linked OCO/bracket support is available.
+- R-based synthetic profit target only unless native linked OCO/bracket support is available; default partial target is 1R and default full target is 1.5R.
 - No options, crypto, futures, margin, shorts, market buys, leveraged ETFs, or unsettled-cash reuse.
 
 ## Tool Mapping
@@ -77,6 +81,7 @@ For daily candidate generation, pass the news snapshot into `swing_strategy.py` 
 ```
 
 Use a -3 to +3 sentiment scale. Missing news is neutral by default. Severe adverse news or a configured blocking event must prevent a new buy candidate even when the technical setup passes.
+When available, include `days_until_earnings`, `next_earnings_date`, or `earnings_date`; the scanner blocks new buys inside the configured earnings blackout window.
 
 ### Historical Price CSV Phase
 

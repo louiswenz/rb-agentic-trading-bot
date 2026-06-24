@@ -184,6 +184,58 @@ def open_position_symbols(state: dict[str, Any], account: dict[str, Any]) -> set
     return symbols
 
 
+def symbol_group(symbol: str, config: dict[str, Any]) -> str:
+    groups = config["strategy"].get("sector_concentration", {}).get("symbol_groups", {})
+    return str(groups.get(symbol.upper(), "other"))
+
+
+def open_group_counts(state: dict[str, Any], account: dict[str, Any], config: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for symbol in open_position_symbols(state, account):
+        group = symbol_group(symbol, config)
+        counts[group] = counts.get(group, 0) + 1
+    return counts
+
+
+def max_positions_per_group(account: dict[str, Any], config: dict[str, Any]) -> int:
+    concentration = config["strategy"].get("sector_concentration", {})
+    risk = config["risk"]
+    equity = float(account.get("equity", account.get("account_value", 0.0)))
+    if equity < float(risk["funding_minimum_standard_usd"]):
+        return int(concentration.get("max_positions_per_group_under_5000", 1))
+    return int(concentration.get("max_positions_per_group_standard", 1))
+
+
+def position_risk_dollars(position: dict[str, Any]) -> float:
+    quantity = float(position.get("quantity", 0.0))
+    entry = float(position.get("entry_price", position.get("average_buy_price", 0.0)) or 0.0)
+    stop = float(position.get("stop_price", 0.0) or 0.0)
+    if quantity <= 0 or entry <= 0 or stop <= 0:
+        return 0.0
+    return max(0.0, (entry - stop) * quantity)
+
+
+def planned_open_risk_dollars(state: dict[str, Any], account: dict[str, Any]) -> float:
+    risks_by_symbol: dict[str, float] = {}
+    for position in account.get("positions", []) or []:
+        symbol = position.get("symbol")
+        if symbol:
+            risks_by_symbol[symbol] = position_risk_dollars(position)
+    state_position = state.get("position") or {}
+    if state_position.get("symbol"):
+        risks_by_symbol[state_position["symbol"]] = max(
+            risks_by_symbol.get(state_position["symbol"], 0.0),
+            position_risk_dollars(state_position),
+        )
+    return sum(risks_by_symbol.values())
+
+
+def remaining_open_risk_dollars(state: dict[str, Any], account: dict[str, Any], config: dict[str, Any]) -> float:
+    equity = float(account.get("equity", account.get("account_value", 0.0)))
+    cap = equity * (float(config["risk"]["total_open_risk_pct"]) / 100.0)
+    return cap - planned_open_risk_dollars(state, account)
+
+
 def monitor_pending_candidates(
     state: dict[str, Any],
     account: dict[str, Any],
@@ -202,10 +254,26 @@ def monitor_pending_candidates(
         return events, actions
 
     held_symbols = open_position_symbols(state, account)
+    group_counts = open_group_counts(state, account, config)
+    max_group_count = max_positions_per_group(account, config)
+    remaining_risk = remaining_open_risk_dollars(state, account, config)
     for candidate in state.get("pending_candidates", []):
         symbol = candidate["symbol"]
         if symbol in held_symbols:
             events.append(event("candidate_already_held", "Candidate skipped because symbol is already held.", symbol=symbol))
+            continue
+        group = str(candidate.get("sector_group") or symbol_group(symbol, config))
+        if (
+            config["strategy"].get("sector_concentration", {}).get("enabled", False)
+            and group_counts.get(group, 0) >= max_group_count
+        ):
+            events.append(event("candidate_group_cap", "Candidate skipped because sector group cap is reached.", symbol=symbol, group=group))
+            continue
+        if float(candidate.get("reward_risk_ratio", 0.0)) < float(config["strategy"]["min_reward_risk_ratio"]):
+            events.append(event("candidate_reward_risk_skip", "Candidate skipped below minimum reward/risk.", symbol=symbol))
+            continue
+        if float(candidate.get("max_loss", 0.0)) > remaining_risk:
+            events.append(event("candidate_open_risk_skip", "Candidate skipped because total open-risk cap would be exceeded.", symbol=symbol))
             continue
         quote = quotes.get(symbol)
         if not quote:
@@ -238,10 +306,15 @@ def review_and_place_auto_buy(
         "order_type": config["execution"]["default_order_type"],
         "limit_price": min(live_price, float(candidate["max_next_session_entry"])),
         "estimated_cost": round(estimated_cost, 2),
+        "estimated_max_loss": round(float(candidate.get("max_loss", 0.0)), 2),
+        "reward_risk_ratio": round(float(candidate.get("reward_risk_ratio", 0.0)), 2),
+        "sector_group": candidate.get("sector_group") or symbol_group(candidate["symbol"], config),
         "requires_broker_review": bool(config["execution"]["require_broker_review_before_order"]),
         "after_fill": {
             "place_protective_stop": True,
             "arm_synthetic_target": True,
+            "target_price": candidate.get("target_price"),
+            "partial_target": candidate.get("partial_target"),
         },
     }
 
@@ -255,7 +328,8 @@ def handle_buy_fill(
     quantity = int(fill["quantity"])
     entry = float(fill["price"])
     stop = float(fill["stop_price"])
-    target = entry * (1.0 + float(config["risk"]["synthetic_profit_target_pct"]) / 100.0)
+    target = entry + ((entry - stop) * float(config["risk"]["synthetic_profit_target_r_multiple"]))
+    partial_target = entry + ((entry - stop) * float(config["risk"]["partial_profit_r_multiple"]))
 
     state["daily_buy_count"] = int(state.get("daily_buy_count", 0)) + 1
     state["position"] = {
@@ -264,13 +338,20 @@ def handle_buy_fill(
         "entry_price": entry,
         "stop_price": stop,
         "target_price": target,
+        "partial_target_price": partial_target,
         "highest_price": entry,
         "opened_at": now_iso(),
     }
     events = [event("buy_filled", "Buy filled; exits armed.", symbol=symbol, quantity=quantity, entry=entry)]
     actions = [
         place_protective_stop(symbol, quantity, stop, config),
-        {"type": "arm_synthetic_profit_target", "symbol": symbol, "target_price": round(target, 2), "quantity": quantity},
+        {
+            "type": "arm_synthetic_profit_target",
+            "symbol": symbol,
+            "partial_target_price": round(partial_target, 2),
+            "target_price": round(target, 2),
+            "quantity": quantity,
+        },
     ]
     return events, actions
 

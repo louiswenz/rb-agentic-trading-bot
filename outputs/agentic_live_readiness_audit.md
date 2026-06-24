@@ -24,8 +24,12 @@ Date: 2026-06-20
 - Maximum automatic new buys per day: 2.
 - Normal open-position monitoring: 900 seconds.
 - Elevated monitoring: 900 seconds.
+- Minimum new-buy reward/risk: 1.5R.
+- Total open-risk cap: 6% of account value.
+- Sector/group concentration cap is enabled.
+- Earnings blackout is enabled when earnings timing is supplied.
 - Protective broker-side stop required after buy fill.
-- Synthetic profit target tracked by monitor.
+- R-based synthetic profit target tracked by monitor.
 - Profit-target sells do not count against the daily new-buy cap.
 - New buys pause on manual activity, daily loss stop, or protective stop failure.
 

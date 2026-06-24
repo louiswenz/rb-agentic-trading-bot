@@ -49,6 +49,9 @@ Live adapter state lives at `work/agentic_live_adapter_state.json`. It uses the 
 ## Safety Behavior
 
 - Daily loss stop pauses new buys at 5% drawdown from start-of-day equity.
+- New buys are skipped when they would exceed the 6% total open-risk cap.
+- New buys are skipped when they violate the configured sector/group cap.
+- New buys are skipped below the 1.5R minimum reward/risk.
 - Manual activity pauses new buys until account state is reconciled.
 - Protective stop failure pauses new buys.
 - Profit target execution never places an independent full-quantity target while a full-quantity stop is live unless native linked OCO support exists.

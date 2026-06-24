@@ -47,9 +47,12 @@ The current automation picks candidates 30 minutes before regular market open at
    - Recent pullback or consolidation is present.
 3. Review latest stock-specific news from the last 48 hours when available.
 4. Block a candidate on severe adverse news, including fraud, bankruptcy, delisting, trading halt, SEC/accounting investigation, or a configured adverse news score at or below -2.
-5. Rank passing candidates by a combined score: 20-day relative strength plus the configured latest-news score weight.
-6. Produce at most 2 pending trade candidates, with the strongest candidate preferred.
-7. Assign each candidate a maximum acceptable next-session entry price, defaulting to 1.0% above the signal close.
+5. Block a candidate inside the configured earnings blackout window when `days_until_earnings`, `next_earnings_date`, or `earnings_date` is supplied in the news snapshot.
+6. Require at least 1.5R expected reward/risk.
+7. Enforce sector/group concentration limits so a small account cannot use both slots in the same group, such as two airline positions.
+8. Rank passing candidates by a combined score: 20-day relative strength plus the configured latest-news score weight.
+9. Produce at most 2 pending trade candidates, with the strongest candidate preferred.
+10. Assign each candidate a maximum acceptable next-session entry price with adaptive gap logic: 0.5% default, 1.0% for strong relative strength plus positive news, and 0.25% for weak/risk-off setups.
 
 News is a decision-support input, not a standalone reason to buy. A symbol must still pass every market, trend, entry, sizing, and cash-account rule before news can improve its rank.
 
@@ -63,19 +66,22 @@ Before any Robinhood order review:
 - Recalculate position size from the live entry price.
 - Use a limit order at or below the maximum acceptable entry price.
 - Skip the trade if the live price is above the maximum acceptable entry price.
-- Skip the trade if the updated position size violates the 4% risk limit, 50% position cap, available settled cash, or maximum-position rules.
+- Skip the trade if the updated position size violates the 4% trade-risk limit, 6% total open-risk cap, 50% position cap, available settled cash, sector/group cap, minimum reward/risk, or maximum-position rules.
 - Emit an audit notification for the buy decision and include protective stop-loss details: symbol, filled quantity, stop price, order type, and time in force.
 
 ## Risk Rules
 
 - Risk at most 4% of account value per trade.
+- Risk at most 6% of account value across all open positions.
 - Cap each position at 50% of account value.
 - Hold at most 3 positions when account value is $5,000 to $25,000.
 - If account value is under $5,000, hold at most 2 positions at a time.
+- Hold at most 1 position per sector/group while account value is under $5,000.
 - For a $2,000 account, the default maximum position is about $1,000 and the maximum planned loss is about $80.
 - Initial stop is the lower of:
   - 8% below entry.
   - Recent 10-session swing low.
+- Skip new trades when the stop distance is outside the configured 4% to 8% range.
 - Pause new trades if current equity is 10% or more below starting monthly equity.
 - Pause new buys if current equity is 5% or more below the start-of-day equity.
 - Resume only after manual review.
@@ -95,7 +101,7 @@ Before any Robinhood order review:
 - Stop-loss exits are automatic after the buy fills: place a broker-side GTC stop-market sell for the filled quantity at the planned stop price.
 - If the buy partially fills, place the stop only for the filled quantity.
 - If the protective stop order is rejected, do not open any additional trade and surface the rejection immediately.
-- Arm a synthetic profit target after the buy fills, defaulting to +12% from entry.
+- Arm a synthetic profit target after the buy fills, using R-based levels by default: partial target at 1R and full synthetic target at 1.5R.
 - If native linked OCO/bracket support is available, prefer a native linked stop/target package.
 - If native linked OCO/bracket support is not available, do not place an independent full-quantity profit target while a full-quantity stop is live.
 - When the synthetic target triggers, re-check the position and stop order, then choose dynamically:

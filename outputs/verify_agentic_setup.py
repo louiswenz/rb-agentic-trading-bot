@@ -105,6 +105,32 @@ def main() -> int:
             str(config["strategy"].get("news_filter", {}).get("enabled")),
         ),
         check(
+            "minimum_reward_risk",
+            config["strategy"].get("min_reward_risk_ratio") == 1.5,
+            str(config["strategy"].get("min_reward_risk_ratio")),
+        ),
+        check(
+            "total_open_risk_cap",
+            config["risk"].get("total_open_risk_pct") == 6.0,
+            str(config["risk"].get("total_open_risk_pct")),
+        ),
+        check(
+            "sector_concentration_enabled",
+            config["strategy"].get("sector_concentration", {}).get("enabled") is True,
+            str(config["strategy"].get("sector_concentration", {}).get("enabled")),
+        ),
+        check(
+            "earnings_blackout_days",
+            config["strategy"].get("earnings_blackout_days") == 5,
+            str(config["strategy"].get("earnings_blackout_days")),
+        ),
+        check(
+            "r_based_profit_targets",
+            config["risk"].get("partial_profit_r_multiple") == 1.0
+            and config["risk"].get("synthetic_profit_target_r_multiple") == 1.5,
+            f"{config['risk'].get('partial_profit_r_multiple')}R/{config['risk'].get('synthetic_profit_target_r_multiple')}R",
+        ),
+        check(
             "normal_monitoring_interval",
             config["monitoring"]["open_position_poll_seconds"] == 900,
             f"{config['monitoring']['open_position_poll_seconds']} seconds",

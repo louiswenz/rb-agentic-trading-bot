@@ -38,7 +38,11 @@ def base_candidate(symbol: str = "AMD") -> dict:
         "max_next_session_entry": 105.0,
         "entry": 100.0,
         "stop": 92.0,
-        "target": 112.0,
+        "partial_target": 108.0,
+        "target_price": 112.0,
+        "max_loss": 80.0,
+        "reward_risk_ratio": 1.5,
+        "sector_group": "semiconductors",
     }
 
 
@@ -78,6 +82,8 @@ class AgenticMonitorTests(unittest.TestCase):
         self.assertEqual(result.actions[0]["type"], "review_and_place_equity_buy")
         self.assertEqual(result.actions[0]["symbol"], "AMD")
         self.assertEqual(result.actions[0]["limit_price"], 101.0)
+        self.assertEqual(result.actions[0]["reward_risk_ratio"], 1.5)
+        self.assertEqual(result.actions[0]["estimated_max_loss"], 80.0)
         self.assertTrue(result.actions[0]["after_fill"]["place_protective_stop"])
         self.assertTrue(result.actions[0]["after_fill"]["arm_synthetic_target"])
 
@@ -103,6 +109,7 @@ class AgenticMonitorTests(unittest.TestCase):
 
         self.assertEqual(self.state["daily_buy_count"], 1)
         self.assertAlmostEqual(self.state["position"]["target_price"], 112.0)
+        self.assertAlmostEqual(self.state["position"]["partial_target_price"], 108.0)
         self.assertEqual(events[0]["kind"], "buy_filled")
         self.assertEqual(actions[0]["type"], "place_protective_stop")
         self.assertEqual(actions[1]["type"], "arm_synthetic_profit_target")
@@ -166,6 +173,43 @@ class AgenticMonitorTests(unittest.TestCase):
         self.assertEqual(result.state["status"], "paused")
         self.assertEqual(result.state["paused_reason"], "manual_activity_detected")
         self.assertEqual(result.actions, [])
+
+    def test_group_cap_blocks_second_position_in_same_sector(self) -> None:
+        position = {
+            "symbol": "NVDA",
+            "quantity": 1,
+            "entry_price": 100.0,
+            "stop_price": 92.0,
+        }
+
+        result = self.run_monitor(
+            account=base_account(position),
+            quotes={"AMD": {"price": 101.0}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
+            candidates=[base_candidate("AMD")],
+        )
+
+        self.assertEqual(result.actions, [])
+        self.assertIn("candidate_group_cap", [item["kind"] for item in result.events])
+
+    def test_total_open_risk_cap_blocks_candidate(self) -> None:
+        position = {
+            "symbol": "DAL",
+            "quantity": 8,
+            "entry_price": 86.24,
+            "stop_price": 76.4,
+        }
+        candidate = base_candidate("BAC")
+        candidate["sector_group"] = "financials"
+        candidate["max_loss"] = 60.0
+
+        result = self.run_monitor(
+            account=base_account(position),
+            quotes={"BAC": {"price": 101.0}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
+            candidates=[candidate],
+        )
+
+        self.assertEqual(result.actions, [])
+        self.assertIn("candidate_open_risk_skip", [item["kind"] for item in result.events])
 
 
 if __name__ == "__main__":

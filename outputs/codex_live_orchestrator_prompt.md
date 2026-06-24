@@ -17,7 +17,7 @@ Workflow:
 3. If `agentic_account_number` is empty, call `get_accounts` and resolve the account by nickname `Agentic`, account ending `6332`, `type=cash`, and `agentic_allowed=true`; persist the full account number only in `work/agentic_live_adapter_state.json`.
 4. Fetch account, portfolio, equity positions, equity orders, and live equity quotes for active position, pending candidates, `SPY`, `VIX`, and required symbols.
 5. For candidate generation, refresh full-universe local daily OHLC history with `outputs/refresh_price_history.py`; if that is unavailable or stale, fall back to Robinhood daily regular-hours historicals in small batches, save the raw JSON under `work/agentic_price_history_raw/`, convert it with `outputs/robinhood_historicals_to_prices.py`, and run `swing_strategy.py` against `work/agentic_price_history`.
-6. For candidate generation, collect latest stock-specific news for each trade-universe symbol when available. Convert it into the `--news-json` snapshot format from the runbook. Missing news is neutral; severe adverse news blocks new buys.
+6. For candidate generation, collect latest stock-specific news for each trade-universe symbol when available. Convert it into the `--news-json` snapshot format from the runbook, including earnings timing fields when available. Missing news is neutral; severe adverse news and configured earnings blackout conditions block new buys.
 7. Normalize snapshots and run `agentic_monitor.py`.
 8. Execute only returned actions allowed by hard caps through Robinhood review/place/cancel tools.
 9. Save updated state.

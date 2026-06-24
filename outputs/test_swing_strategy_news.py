@@ -81,6 +81,8 @@ class SwingStrategyNewsTests(unittest.TestCase):
         self.assertEqual(candidate.news_score, 2.0)
         self.assertGreater(candidate.combined_rank_score, candidate.relative_strength_pct)
         self.assertIn("analyst upgrade", candidate.reason)
+        self.assertAlmostEqual(candidate.reward_risk_ratio, 1.5)
+        self.assertAlmostEqual(candidate.max_entry, candidate.entry * 1.005)
 
     def test_blocking_news_rejects_candidate(self) -> None:
         candidate = swing_strategy.scan_symbol(
@@ -108,9 +110,25 @@ class SwingStrategyNewsTests(unittest.TestCase):
 
         self.assertIsNone(candidate)
 
+    def test_earnings_blackout_rejects_candidate(self) -> None:
+        candidate = swing_strategy.scan_symbol(
+            "AMD",
+            self.stock_bars,
+            self.spy_bars,
+            account_value=2000.0,
+            settled_cash=2000.0,
+            config=self.config,
+            news_snapshot={"AMD": {"sentiment_score": 1.0, "summary": "earnings soon", "days_until_earnings": 3}},
+        )
+
+        self.assertIsNone(candidate)
+
     def test_parse_symbol_set_accepts_csv_and_json(self) -> None:
         self.assertEqual(swing_strategy.parse_symbol_set("dal, AMD "), {"DAL", "AMD"})
         self.assertEqual(swing_strategy.parse_symbol_set('["dal", "AMD"]'), {"DAL", "AMD"})
+
+    def test_adaptive_gap_uses_strong_setup_threshold(self) -> None:
+        self.assertEqual(swing_strategy.adaptive_gap_pct(9.0, 1.0, self.config), 1.0)
 
 
 if __name__ == "__main__":
