@@ -158,10 +158,12 @@ For each action:
 
 Use one thread heartbeat for the live orchestrator:
 
-- Premarket candidate scan: separate cron automation at 6:00 AM PT, 30 minutes before regular market open. It may create/update pending candidates only and must not review, place, cancel, or modify orders.
+- Candidate scans: separate cron automation at 6:00 AM PT and 10:00 AM PT on weekdays. Both runs may create/update pending candidates only and must not review, place, cancel, or modify orders.
+- Premarket candidate scan: 6:00 AM PT, 30 minutes before regular market open.
+- Intraday candidate scan: 10:00 AM PT, using current account constraints, held symbols, live prices, and open-risk budget.
 - Schedule mode: regular market hours only.
 - Regular market window: 6:30 AM to 1:00 PM PT, Monday through Friday, excluding market holidays.
-- Current single-heartbeat envelope: weekdays at 15-minute marks from 6:00 AM through 1:45 PM PT, with mandatory quiet no-op at 6:00, 6:15, 1:15, 1:30, and 1:45 unless unresolved protective-stop or open-order risk exists. This envelope is used because this thread supports only one active heartbeat automation.
+- Current single-heartbeat envelope: weekdays at 15-minute marks from 6:00 AM through 1:45 PM PT, with mandatory quiet no-op at 6:00, 6:15, 1:15, 1:30, and 1:45 unless unresolved protective-stop or open-order risk exists. At or shortly after 10:00 AM PT, the heartbeat may run the candidate scanner only if the dedicated scanner automation has not already recorded the current 10:00 AM scan. This envelope is used because this thread supports only one active heartbeat automation.
 - Normal cadence: every 15 minutes during the regular market window when a position is open or pending candidate requires validation.
 - Elevated states: keep the 15-minute heartbeat when an order is active, first 30 minutes after entry, or price is within 1% of stop/target; notify only on meaningful state changes.
 - Morning validation: run at or after 6:45 AM PT / 9:45 AM ET when a pending candidate exists.

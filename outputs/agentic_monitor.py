@@ -25,6 +25,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "start_of_day_equity": None,
     "last_account_snapshot": None,
     "position": None,
+    "positions": [],
     "pending_candidates": [],
     "open_orders": [],
     "last_events": [],
@@ -44,6 +45,9 @@ class MonitorResult:
 def load_json(path_or_value: str | None, default: Any) -> Any:
     if not path_or_value:
         return deepcopy(default)
+    stripped = path_or_value.lstrip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        return json.loads(path_or_value)
     path = Path(path_or_value)
     if path.exists():
         with path.open("r", encoding="utf-8") as handle:
@@ -96,13 +100,46 @@ def reconcile_account(
     state["open_orders"] = [order for order in orders if order.get("state") in {"open", "queued", "confirmed"}]
 
     positions = account.get("positions", [])
-    state["position"] = positions[0] if positions else None
+    state["account_positions"] = positions
+    sync_tracked_positions(state, positions)
 
     if prior and prior.get("positions") != account.get("positions"):
         events.append(event("account_position_change", "Position state changed.", positions=account.get("positions", [])))
     if prior and prior.get("buying_power") != account.get("buying_power"):
         events.append(event("buying_power_change", "Buying power changed.", buying_power=account.get("buying_power")))
     return events
+
+
+def sync_tracked_positions(state: dict[str, Any], account_positions: list[dict[str, Any]]) -> None:
+    by_symbol = {position.get("symbol"): position for position in account_positions if position.get("symbol")}
+    tracked = tracked_positions(state)
+    synced: list[dict[str, Any]] = []
+
+    for position in tracked:
+        symbol = position.get("symbol")
+        account_position = by_symbol.get(symbol)
+        if not account_position:
+            continue
+        merged = deepcopy(position)
+        merged["quantity"] = account_position.get("quantity", merged.get("quantity"))
+        merged["average_buy_price"] = account_position.get("average_buy_price", merged.get("average_buy_price"))
+        synced.append(merged)
+
+    tracked_symbols = {position.get("symbol") for position in synced}
+    for symbol, account_position in by_symbol.items():
+        if symbol not in tracked_symbols:
+            synced.append(account_position)
+
+    state["positions"] = synced
+    state["position"] = synced[0] if synced else None
+
+
+def tracked_positions(state: dict[str, Any]) -> list[dict[str, Any]]:
+    positions = state.get("positions")
+    if isinstance(positions, list) and positions:
+        return [position for position in positions if position]
+    position = state.get("position")
+    return [position] if position else []
 
 
 def detect_manual_activity(state: dict[str, Any], account: dict[str, Any], orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -137,27 +174,30 @@ def detect_price_events(
     quotes: dict[str, Any],
     config: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    position = state.get("position")
-    if not position:
+    positions = tracked_positions(state)
+    if not positions:
         return []
 
-    symbol = position["symbol"]
-    quote = quotes.get(symbol)
-    if not quote:
-        return [event("stale_quote", "No live quote for active position.", symbol=symbol)]
-
-    price = float(quote["price"])
-    stop = float(position.get("stop_price", 0.0))
-    target = float(position.get("target_price", 0.0))
     near_pct = float(config["monitoring"]["near_stop_or_target_pct"])
     events: list[dict[str, Any]] = []
 
-    if stop and price <= stop * (1.0 + near_pct / 100.0):
-        events.append(event("near_stop", "Price is near protective stop.", symbol=symbol, price=price, stop=stop))
-    if target and price >= target * (1.0 - near_pct / 100.0):
-        events.append(event("near_target", "Price is near profit target.", symbol=symbol, price=price, target=target))
-    if target and price >= target:
-        events.append(event("target_reached", "Synthetic profit target reached.", symbol=symbol, price=price, target=target))
+    for position in positions:
+        symbol = position["symbol"]
+        quote = quotes.get(symbol)
+        if not quote:
+            events.append(event("stale_quote", "No live quote for active position.", symbol=symbol))
+            continue
+
+        price = float(quote["price"])
+        stop = float(position.get("stop_price", 0.0))
+        target = float(position.get("target_price", 0.0))
+
+        if stop and price <= stop * (1.0 + near_pct / 100.0):
+            events.append(event("near_stop", "Price is near protective stop.", symbol=symbol, price=price, stop=stop))
+        if target and price >= target * (1.0 - near_pct / 100.0):
+            events.append(event("near_target", "Price is near profit target.", symbol=symbol, price=price, target=target))
+        if target and price >= target:
+            events.append(event("target_reached", "Synthetic profit target reached.", symbol=symbol, price=price, target=target))
     return events
 
 
@@ -178,9 +218,9 @@ def current_open_position_count(state: dict[str, Any], account: dict[str, Any]) 
 
 def open_position_symbols(state: dict[str, Any], account: dict[str, Any]) -> set[str]:
     symbols = {position.get("symbol") for position in account.get("positions", []) if position.get("symbol")}
-    state_position = state.get("position") or {}
-    if state_position.get("symbol"):
-        symbols.add(state_position["symbol"])
+    for state_position in tracked_positions(state):
+        if state_position.get("symbol"):
+            symbols.add(state_position["symbol"])
     return symbols
 
 
@@ -221,12 +261,12 @@ def planned_open_risk_dollars(state: dict[str, Any], account: dict[str, Any]) ->
         symbol = position.get("symbol")
         if symbol:
             risks_by_symbol[symbol] = position_risk_dollars(position)
-    state_position = state.get("position") or {}
-    if state_position.get("symbol"):
-        risks_by_symbol[state_position["symbol"]] = max(
-            risks_by_symbol.get(state_position["symbol"], 0.0),
-            position_risk_dollars(state_position),
-        )
+    for state_position in tracked_positions(state):
+        if state_position.get("symbol"):
+            risks_by_symbol[state_position["symbol"]] = max(
+                risks_by_symbol.get(state_position["symbol"], 0.0),
+                position_risk_dollars(state_position),
+            )
     return sum(risks_by_symbol.values())
 
 
@@ -332,7 +372,7 @@ def handle_buy_fill(
     partial_target = entry + ((entry - stop) * float(config["risk"]["partial_profit_r_multiple"]))
 
     state["daily_buy_count"] = int(state.get("daily_buy_count", 0)) + 1
-    state["position"] = {
+    new_position = {
         "symbol": symbol,
         "quantity": quantity,
         "entry_price": entry,
@@ -342,6 +382,10 @@ def handle_buy_fill(
         "highest_price": entry,
         "opened_at": now_iso(),
     }
+    positions = [item for item in tracked_positions(state) if item.get("symbol") != symbol]
+    positions.append(new_position)
+    state["positions"] = positions
+    state["position"] = positions[0] if positions else None
     events = [event("buy_filled", "Buy filled; exits armed.", symbol=symbol, quantity=quantity, entry=entry)]
     actions = [
         place_protective_stop(symbol, quantity, stop, config),
@@ -374,8 +418,7 @@ def handle_stop_failure(state: dict[str, Any], reason: str) -> list[dict[str, An
     return [event("protective_stop_failure", "Protective stop failed; new buys paused.", reason=reason)]
 
 
-def choose_profit_action(state: dict[str, Any], quotes: dict[str, Any], config: dict[str, Any]) -> str:
-    position = state.get("position") or {}
+def choose_profit_action(position: dict[str, Any], quotes: dict[str, Any], config: dict[str, Any]) -> str:
     symbol = position.get("symbol")
     quote = quotes.get(symbol, {})
     spy = quotes.get(config["strategy"]["benchmark_symbol"], {})
@@ -389,10 +432,7 @@ def choose_profit_action(state: dict[str, Any], quotes: dict[str, Any], config: 
     return "partial_sell"
 
 
-def execute_profit_target(state: dict[str, Any], action: str, config: dict[str, Any]) -> list[dict[str, Any]]:
-    position = state.get("position")
-    if not position:
-        return []
+def execute_profit_target(position: dict[str, Any], action: str, config: dict[str, Any]) -> list[dict[str, Any]]:
     quantity = int(position["quantity"])
     if action == "trail_only":
         return [{"type": "raise_or_maintain_trailing_stop", "symbol": position["symbol"], "quantity": quantity}]
@@ -413,12 +453,15 @@ def execute_profit_target(state: dict[str, Any], action: str, config: dict[str, 
 
 
 def handle_exit_fill(state: dict[str, Any], fill: dict[str, Any]) -> list[dict[str, Any]]:
-    position = state.get("position")
+    symbol = fill["symbol"]
+    positions = tracked_positions(state)
+    position = next((item for item in positions if item.get("symbol") == symbol), None)
     if not position:
         return []
     remaining = int(position["quantity"]) - int(fill["quantity"])
     if remaining <= 0:
-        state["position"] = None
+        state["positions"] = [item for item in positions if item.get("symbol") != symbol]
+        state["position"] = state["positions"][0] if state["positions"] else None
         return [event("position_closed", "Position fully closed.", symbol=fill["symbol"])]
     position["quantity"] = remaining
     return [event("position_reduced", "Position reduced; stop must match remaining quantity.", symbol=fill["symbol"], remaining=remaining)]
@@ -431,17 +474,21 @@ def monitor_active_position(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     events = detect_price_events(state, quotes, config)
     actions: list[dict[str, Any]] = []
-    if any(item["kind"] == "target_reached" for item in events):
-        profit_action = choose_profit_action(state, quotes, config)
-        events.append(event("profit_action_chosen", "Dynamic profit action selected.", action=profit_action))
-        actions.extend(execute_profit_target(state, profit_action, config))
+    for target_event in [item for item in events if item["kind"] == "target_reached"]:
+        symbol = target_event["details"]["symbol"]
+        position = next((item for item in tracked_positions(state) if item.get("symbol") == symbol), None)
+        if not position:
+            continue
+        profit_action = choose_profit_action(position, quotes, config)
+        events.append(event("profit_action_chosen", "Dynamic profit action selected.", symbol=symbol, action=profit_action))
+        actions.extend(execute_profit_target(position, profit_action, config))
     return events, actions
 
 
 def next_poll_interval(state: dict[str, Any], events: list[dict[str, Any]], config: dict[str, Any]) -> int | None:
     if state.get("open_orders") or any(item["kind"] in {"near_stop", "near_target", "target_reached"} for item in events):
         return int(config["monitoring"]["elevated_poll_seconds"])
-    if state.get("position"):
+    if tracked_positions(state):
         return int(config["monitoring"]["open_position_poll_seconds"])
     if state.get("pending_candidates"):
         return None
@@ -478,7 +525,18 @@ def build_daily_brief(
     quotes: dict[str, Any],
     refinement_events: list[dict[str, Any]],
 ) -> str:
-    position = state.get("position") or {}
+    positions = tracked_positions(state)
+    position_label = ", ".join(position.get("symbol", "unknown") for position in positions) if positions else "flat"
+    stop_label = ", ".join(
+        f"{position.get('symbol')} {round(float(position['stop_price']), 2)}"
+        for position in positions
+        if position.get("stop_price")
+    ) or "n/a"
+    target_label = ", ".join(
+        f"{position.get('symbol')} {round(float(position['target_price']), 2)}"
+        for position in positions
+        if position.get("target_price")
+    ) or "n/a"
     lines = [
         "| Item | Value |",
         "|---|---:|",
@@ -486,9 +544,9 @@ def build_daily_brief(
         f"| Buying power | {account.get('buying_power', 'n/a')} |",
         f"| Status | {state.get('status')} |",
         f"| Daily buys | {state.get('daily_buy_count', 0)} |",
-        f"| Position | {position.get('symbol', 'flat')} |",
-        f"| Stop | {round(float(position['stop_price']), 2) if position.get('stop_price') else 'n/a'} |",
-        f"| Target | {round(float(position['target_price']), 2) if position.get('target_price') else 'n/a'} |",
+        f"| Position | {position_label} |",
+        f"| Stop | {stop_label} |",
+        f"| Target | {target_label} |",
         f"| Refinements | {len(refinement_events)} |",
     ]
     return "\n".join(lines)
@@ -514,8 +572,9 @@ def run_monitor(
     events.extend(daily_loss_guard(state, account, config))
 
     watched_symbols = []
-    if state.get("position"):
-        watched_symbols.append(state["position"]["symbol"])
+    for position in tracked_positions(state):
+        if position.get("symbol"):
+            watched_symbols.append(position["symbol"])
     watched_symbols.extend(candidate["symbol"] for candidate in candidates)
     watched_symbols.extend([config["strategy"]["benchmark_symbol"], "VIX"])
     live_quotes = fetch_live_quotes(sorted(set(watched_symbols)), quotes)

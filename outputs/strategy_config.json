@@ -241,6 +241,8 @@
     "regular_market_open_pt": "06:30",
     "regular_market_close_pt": "13:00",
     "premarket_candidate_scan_time_pt": "06:00",
+    "intraday_candidate_scan_time_pt": "10:00",
+    "candidate_scan_times_pt": ["06:00", "10:00"],
     "no_position_no_candidate_brief_time_pt": "13:30",
     "pending_candidate_validation_time_pt": "06:45",
     "open_position_poll_seconds": 900,

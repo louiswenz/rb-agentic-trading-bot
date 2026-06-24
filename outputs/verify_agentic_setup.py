@@ -151,6 +151,12 @@ def main() -> int:
             str(config["monitoring"].get("premarket_candidate_scan_time_pt")),
         ),
         check(
+            "intraday_candidate_scan_time",
+            config["monitoring"].get("intraday_candidate_scan_time_pt") == "10:00"
+            and config["monitoring"].get("candidate_scan_times_pt") == ["06:00", "10:00"],
+            str(config["monitoring"].get("candidate_scan_times_pt")),
+        ),
+        check(
             "standing_authorization_state",
             state["standing_authorization"] is True,
             str(state["standing_authorization"]),
@@ -210,17 +216,17 @@ def main() -> int:
             "news-aware candidate language present",
         ),
         check(
-            "premarket_candidate_scan_active",
+            "twice_daily_candidate_scan_active",
             morning_auto["status"] == "ACTIVE"
             and morning_auto["kind"] == "cron"
-            and "BYHOUR=6" in morning_rrule
+            and "BYHOUR=6,10" in morning_rrule
             and "BYMINUTE=0" in morning_rrule,
             f"{morning_auto['status']} {morning_rrule}",
         ),
         check(
-            "premarket_prompt_pending_candidates_only",
+            "scanner_prompt_pending_candidates_only",
             "pending candidates only" in morning_prompt and "must not review, place, cancel, or modify any order" in morning_prompt,
-            "premarket scan is non-ordering",
+            "candidate scanner is non-ordering",
         ),
     ]
 

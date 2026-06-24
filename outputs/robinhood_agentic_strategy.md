@@ -35,7 +35,7 @@ Rules:
 
 ## Daily Scan
 
-The current automation picks candidates 30 minutes before regular market open at 6:00 AM PT on weekdays. This premarket scan uses the latest available historical OHLC data, account state, and stock-specific news. It may create pending candidates only; it must not submit, review, cancel, or modify orders.
+The current automation picks candidates twice per weekday: 30 minutes before regular market open at 6:00 AM PT and again intraday at 10:00 AM PT. Both scans use the latest available historical OHLC data, account state, and stock-specific news. The 10:00 AM PT scan also uses current held symbols, live prices, and open-risk budget. These scans may create pending candidates only; they must not submit, review, cancel, or modify orders.
 
 1. Confirm `SPY` is above its 50-day moving average.
 2. For each watchlist symbol, require:
@@ -90,6 +90,7 @@ Before any Robinhood order review:
 
 - No position / no candidate: quiet during the market-hours heartbeat unless an event occurs.
 - Premarket candidate picking: 6:00 AM PT on weekdays, pending candidates only.
+- Intraday candidate rediscovery: 10:00 AM PT on weekdays, pending candidates only.
 - Pending candidate: one morning validation event at 6:45 AM PT / 9:45 AM ET if actionable.
 - Open position: silent checks every 15 minutes during regular market hours.
 - Active order, first 30 minutes after entry, or within 1% of stop/target: keep the 15-minute market-hours heartbeat and notify only on meaningful state changes.
