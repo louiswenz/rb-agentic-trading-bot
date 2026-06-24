@@ -154,6 +154,19 @@ def load_news_snapshot(path_or_json: str | None) -> dict[str, Any]:
     return json.loads(path_or_json)
 
 
+def parse_symbol_set(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    value = value.strip()
+    if not value:
+        return set()
+    if value.startswith("["):
+        symbols = json.loads(value)
+    else:
+        symbols = value.split(",")
+    return {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+
+
 def normalize_news_item(symbol: str, news_snapshot: dict[str, Any], config: dict[str, Any]) -> tuple[bool, float, str]:
     news_config = config["strategy"].get("news_filter", {})
     if not news_config.get("enabled", False):
@@ -388,6 +401,11 @@ def main() -> int:
     )
     parser.add_argument("--positions-count", type=int, default=0, help="Current open position count.")
     parser.add_argument(
+        "--held-symbols",
+        default="",
+        help="Comma-separated symbols or JSON array already held; held symbols are excluded from new-buy candidates.",
+    )
+    parser.add_argument(
         "--live-prices",
         help="Optional JSON object of next-session live prices, e.g. '{\"QQQ\": 438.25}'. "
         "When provided, candidates above their max entry are rejected and sizing is recalculated.",
@@ -418,6 +436,7 @@ def main() -> int:
     }
     live_prices = json.loads(args.live_prices) if args.live_prices else {}
     news_snapshot = load_news_snapshot(args.news_json)
+    held_symbols = parse_symbol_set(args.held_symbols)
     if strategy.get("news_filter", {}).get("enabled", False):
         output["messages"].append(
             f"News filter active: latest symbol news is scored over the last "
@@ -457,6 +476,9 @@ def main() -> int:
     slots = max_positions - args.positions_count
     for symbol in symbols:
         if symbol == benchmark:
+            continue
+        if symbol.upper() in held_symbols:
+            output["messages"].append(f"{symbol} skipped: already held.")
             continue
         path = prices_dir / f"{symbol}.csv"
         if not path.exists():
@@ -550,7 +572,7 @@ def main() -> int:
                     "pause new buys and notify if target sell or stop replacement fails",
                 ],
             },
-            "requires_user_confirmation": True,
+            "requires_user_confirmation": bool(config["execution"]["require_explicit_user_confirmation"]),
         }
         for item in limited
     ]
@@ -603,7 +625,10 @@ def emit(output: dict[str, Any], as_json: bool) -> int:
                 f"synthetic monitor at {target['target_price']} "
                 f"({target['target_pct']:g}%); action {target['default_action']}"
             )
-        print("  Order status: requires explicit user confirmation before any placement")
+        if item["requires_user_confirmation"]:
+            print("  Order status: requires explicit user confirmation before any placement")
+        else:
+            print("  Order status: automatic trading authorized by config; broker review still required when available")
     return 0
 
 

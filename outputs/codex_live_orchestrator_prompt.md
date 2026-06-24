@@ -30,7 +30,7 @@ Schedule behavior:
 - Regular market window: 6:30 AM to 1:00 PM PT, Monday through Friday, excluding market holidays.
 - Current single-heartbeat envelope: weekdays at 15-minute marks from 6:00 AM through 1:45 PM PT, with quiet no-op before 6:30 AM and after 1:00 PM unless unresolved protective-stop or open-order risk exists.
 - Normal heartbeat inside market window: 15 minutes.
-- Elevated heartbeat: 1 minute when `next_poll_seconds=60`, an order is active, first 30 minutes after entry, or price is within 1% of stop/target.
+- Elevated states: keep the 15-minute heartbeat when an order is active, first 30 minutes after entry, or price is within 1% of stop/target; notify only on meaningful state changes.
 - Morning validation: at or after 6:45 AM PT.
 - Daily after-close brief: not scheduled while market-hours-only mode is active.
 - Outside trading windows: no-op unless unresolved order/position risk exists.

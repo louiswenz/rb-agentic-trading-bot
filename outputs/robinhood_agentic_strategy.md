@@ -49,7 +49,7 @@ The current automation picks candidates 30 minutes before regular market open at
 4. Block a candidate on severe adverse news, including fraud, bankruptcy, delisting, trading halt, SEC/accounting investigation, or a configured adverse news score at or below -2.
 5. Rank passing candidates by a combined score: 20-day relative strength plus the configured latest-news score weight.
 6. Produce at most 2 pending trade candidates, with the strongest candidate preferred.
-7. Assign each candidate a maximum acceptable next-session entry price, defaulting to 0.5% above the signal close.
+7. Assign each candidate a maximum acceptable next-session entry price, defaulting to 1.0% above the signal close.
 
 News is a decision-support input, not a standalone reason to buy. A symbol must still pass every market, trend, entry, sizing, and cash-account rule before news can improve its rank.
 
@@ -71,7 +71,7 @@ Before any Robinhood order review:
 - Risk at most 4% of account value per trade.
 - Cap each position at 50% of account value.
 - Hold at most 3 positions when account value is $5,000 to $25,000.
-- If account value is under $5,000, hold at most 1 position at a time.
+- If account value is under $5,000, hold at most 2 positions at a time.
 - For a $2,000 account, the default maximum position is about $1,000 and the maximum planned loss is about $80.
 - Initial stop is the lower of:
   - 8% below entry.
@@ -86,7 +86,7 @@ Before any Robinhood order review:
 - Premarket candidate picking: 6:00 AM PT on weekdays, pending candidates only.
 - Pending candidate: one morning validation event at 6:45 AM PT / 9:45 AM ET if actionable.
 - Open position: silent checks every 15 minutes during regular market hours.
-- Active order, first 30 minutes after entry, or within 1% of stop/target: checks every 1 minute.
+- Active order, first 30 minutes after entry, or within 1% of stop/target: keep the 15-minute market-hours heartbeat and notify only on meaningful state changes.
 - Daily after-close brief: not scheduled in market-hours-only mode.
 - Polls stay quiet unless a meaningful event occurs.
 

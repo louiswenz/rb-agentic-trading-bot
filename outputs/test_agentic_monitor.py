@@ -126,7 +126,7 @@ class AgenticMonitorTests(unittest.TestCase):
             mode="position",
         )
 
-        self.assertEqual(result.next_poll_seconds, 60)
+        self.assertEqual(result.next_poll_seconds, 900)
         self.assertIn("target_reached", [item["kind"] for item in result.events])
         self.assertIn("profit_action_chosen", [item["kind"] for item in result.events])
         self.assertEqual(result.actions[0]["type"], "cancel_or_reduce_protective_stop")

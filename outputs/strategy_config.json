@@ -81,7 +81,7 @@
     "same_day_chase_limit_pct": 5.0,
     "recent_swing_low_days": 10,
     "pullback_lookback_days": 5,
-    "next_session_max_gap_pct": 0.5,
+    "next_session_max_gap_pct": 1.0,
     "news_filter": {
       "enabled": true,
       "lookback_hours": 48,
@@ -173,7 +173,7 @@
     "no_position_no_candidate_brief_time_pt": "13:30",
     "pending_candidate_validation_time_pt": "06:45",
     "open_position_poll_seconds": 900,
-    "elevated_poll_seconds": 60,
+    "elevated_poll_seconds": 900,
     "near_stop_or_target_pct": 1.0,
     "elevated_after_entry_minutes": 30,
     "daily_brief_time_pt": "13:30",

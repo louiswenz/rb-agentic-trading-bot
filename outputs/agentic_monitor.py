@@ -178,8 +178,9 @@ def current_open_position_count(state: dict[str, Any], account: dict[str, Any]) 
 
 def open_position_symbols(state: dict[str, Any], account: dict[str, Any]) -> set[str]:
     symbols = {position.get("symbol") for position in account.get("positions", []) if position.get("symbol")}
-    if state.get("position", {}).get("symbol"):
-        symbols.add(state["position"]["symbol"])
+    state_position = state.get("position") or {}
+    if state_position.get("symbol"):
+        symbols.add(state_position["symbol"])
     return symbols
 
 

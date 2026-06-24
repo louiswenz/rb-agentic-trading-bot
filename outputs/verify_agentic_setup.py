@@ -61,6 +61,13 @@ def main() -> int:
     morning_prompt = str(morning_auto.get("prompt", ""))
     morning_rrule = str(morning_auto["rrule"])
     robinhood_tools = codex_config["mcp_servers"]["robinhood"]["tools"]
+    verified_snapshot = state.get("last_verified_snapshot", {})
+    required_snapshot_fields = [
+        "account_value",
+        "buying_power",
+        "equity_positions_count",
+        "open_equity_orders_count",
+    ]
     required_robinhood_approvals = [
         "get_accounts",
         "get_portfolio",
@@ -104,7 +111,7 @@ def main() -> int:
         ),
         check(
             "elevated_monitoring_interval",
-            config["monitoring"]["elevated_poll_seconds"] == 60,
+            config["monitoring"]["elevated_poll_seconds"] == 900,
             f"{config['monitoring']['elevated_poll_seconds']} seconds",
         ),
         check(
@@ -134,10 +141,8 @@ def main() -> int:
         ),
         check(
             "verified_account_snapshot",
-            state.get("last_verified_snapshot", {}).get("buying_power") == 2000.0
-            and state.get("last_verified_snapshot", {}).get("equity_positions_count") == 0
-            and state.get("last_verified_snapshot", {}).get("open_equity_orders_count") == 0,
-            str(state.get("last_verified_snapshot", {})),
+            all(isinstance(verified_snapshot.get(field), (int, float)) for field in required_snapshot_fields),
+            str(verified_snapshot),
         ),
         check(
             "robinhood_mcp_enabled",

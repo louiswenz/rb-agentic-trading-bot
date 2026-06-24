@@ -108,6 +108,10 @@ class SwingStrategyNewsTests(unittest.TestCase):
 
         self.assertIsNone(candidate)
 
+    def test_parse_symbol_set_accepts_csv_and_json(self) -> None:
+        self.assertEqual(swing_strategy.parse_symbol_set("dal, AMD "), {"DAL", "AMD"})
+        self.assertEqual(swing_strategy.parse_symbol_set('["dal", "AMD"]'), {"DAL", "AMD"})
+
 
 if __name__ == "__main__":
     unittest.main()

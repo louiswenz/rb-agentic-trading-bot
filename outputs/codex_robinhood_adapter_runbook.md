@@ -158,12 +158,12 @@ Use one thread heartbeat for the live orchestrator:
 - Regular market window: 6:30 AM to 1:00 PM PT, Monday through Friday, excluding market holidays.
 - Current single-heartbeat envelope: weekdays at 15-minute marks from 6:00 AM through 1:45 PM PT, with mandatory quiet no-op at 6:00, 6:15, 1:15, 1:30, and 1:45 unless unresolved protective-stop or open-order risk exists. This envelope is used because this thread supports only one active heartbeat automation.
 - Normal cadence: every 15 minutes during the regular market window when a position is open or pending candidate requires validation.
-- Elevated cadence: every 1 minute when an order is active, first 30 minutes after entry, or price is within 1% of stop/target.
+- Elevated states: keep the 15-minute heartbeat when an order is active, first 30 minutes after entry, or price is within 1% of stop/target; notify only on meaningful state changes.
 - Morning validation: run at or after 6:45 AM PT / 9:45 AM ET when a pending candidate exists.
 - After-close scan/brief: not scheduled while market-hours-only mode is active. Add a separate after-close automation if you want candidate generation and daily brief outside regular hours.
 - Outside market windows: no-op unless an order/position risk event is unresolved.
 
-The orchestrator should update its heartbeat cadence based on `next_poll_seconds` when supported. If cadence mutation is unavailable in a run, keep the 15-minute heartbeat and report that elevated 1-minute monitoring was requested but not applied.
+The orchestrator should keep the heartbeat cadence at 15 minutes. Do not request a one-minute cadence; elevated states are handled by the same 15-minute market-hours run plus event notifications.
 
 ## Notifications
 

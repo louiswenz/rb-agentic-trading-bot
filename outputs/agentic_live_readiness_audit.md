@@ -12,7 +12,7 @@ Date: 2026-06-20
 - Private live state file exists at `work/agentic_live_adapter_state.json`.
 - Main automation `daily-agentic-account-scan` is active.
 - Normal heartbeat is every 15 minutes.
-- Elevated monitoring target is every 1 minute when active order/risk conditions require it.
+- Elevated order/risk states stay on the 15-minute heartbeat and notify only on meaningful state changes.
 - Duplicate morning automation is paused.
 - Local readiness verifier passes.
 - Behavior tests for monitor decisions are present in `test_agentic_monitor.py`.
@@ -23,7 +23,7 @@ Date: 2026-06-20
 
 - Maximum automatic new buys per day: 2.
 - Normal open-position monitoring: 900 seconds.
-- Elevated monitoring: 60 seconds.
+- Elevated monitoring: 900 seconds.
 - Protective broker-side stop required after buy fill.
 - Synthetic profit target tracked by monitor.
 - Profit-target sells do not count against the daily new-buy cap.
