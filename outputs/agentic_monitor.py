@@ -76,6 +76,15 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def event(kind: str, message: str, **details: Any) -> dict[str, Any]:
     return {"time": now_iso(), "kind": kind, "message": message, "details": details}
 
@@ -189,6 +198,7 @@ def detect_price_events(
             continue
 
         price = float(quote["price"])
+        position["highest_price"] = max(float(position.get("highest_price", price) or price), price)
         stop = float(position.get("stop_price", 0.0))
         target = float(position.get("target_price", 0.0))
 
@@ -253,6 +263,123 @@ def position_risk_dollars(position: dict[str, Any]) -> float:
     if quantity <= 0 or entry <= 0 or stop <= 0:
         return 0.0
     return max(0.0, (entry - stop) * quantity)
+
+
+def position_age_minutes(position: dict[str, Any]) -> float | None:
+    opened_at = parse_iso(position.get("opened_at"))
+    if not opened_at:
+        return None
+    if opened_at.tzinfo is None:
+        opened_at = opened_at.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - opened_at).total_seconds() / 60.0
+
+
+def protective_stop_order_for_symbol(state: dict[str, Any], symbol: str) -> dict[str, Any] | None:
+    for order in state.get("open_orders", []):
+        if (
+            order.get("symbol") == symbol
+            and order.get("side") == "sell"
+            and order.get("trigger") == "stop"
+            and order.get("state") in {"open", "queued", "confirmed"}
+        ):
+            return order
+    return None
+
+
+def proposed_ratchet_stop(position: dict[str, Any], price: float, config: dict[str, Any]) -> tuple[float | None, str | None]:
+    risk_config = config["risk"]
+    if not bool(risk_config.get("protective_stop_ratchet_enabled", False)):
+        return None, None
+
+    age = position_age_minutes(position)
+    min_age = float(risk_config.get("min_minutes_before_stop_ratchet", 0.0))
+    if age is not None and age < min_age:
+        return None, None
+
+    entry = float(position.get("entry_price", position.get("average_buy_price", 0.0)) or 0.0)
+    current_stop = float(position.get("stop_price", 0.0) or 0.0)
+    initial_stop = float(position.get("initial_stop_price", current_stop) or current_stop)
+    if entry <= 0 or current_stop <= 0 or initial_stop <= 0 or initial_stop >= entry or price <= entry:
+        return None, None
+
+    initial_risk = entry - initial_stop
+    current_r = (price - entry) / initial_risk
+    highest_price = max(float(position.get("highest_price", price) or price), price)
+    proposed = current_stop
+    reason = None
+
+    if current_r >= float(risk_config.get("breakeven_stop_trigger_r_multiple", 0.75)):
+        proposed = max(proposed, entry)
+        reason = "breakeven"
+
+    if current_r >= float(risk_config.get("trail_stop_trigger_r_multiple", 1.0)):
+        trailing_stop = highest_price * (1.0 - float(risk_config["trailing_stop_pct"]) / 100.0)
+        if trailing_stop > proposed:
+            proposed = trailing_stop
+            reason = "trailing_high_watermark"
+
+    if proposed <= current_stop:
+        return None, None
+
+    min_below_price = float(risk_config.get("min_stop_below_current_price_pct", 1.0))
+    max_safe_stop = price * (1.0 - min_below_price / 100.0)
+    proposed = min(proposed, max_safe_stop)
+    min_raise_pct = float(risk_config.get("min_stop_raise_pct", 0.5))
+    if proposed <= current_stop * (1.0 + min_raise_pct / 100.0):
+        return None, None
+
+    return round(proposed, 2), reason
+
+
+def ratchet_protective_stops(
+    state: dict[str, Any],
+    quotes: dict[str, Any],
+    config: dict[str, Any],
+    skip_symbols: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    events: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = []
+    skip_symbols = skip_symbols or set()
+    for position in tracked_positions(state):
+        symbol = position.get("symbol")
+        if symbol in skip_symbols:
+            continue
+        quote = quotes.get(symbol)
+        if not symbol or not quote:
+            continue
+        price = float(quote["price"])
+        new_stop, reason = proposed_ratchet_stop(position, price, config)
+        if new_stop is None:
+            continue
+        stop_order = protective_stop_order_for_symbol(state, symbol)
+        quantity = int(float(position.get("quantity", 0)))
+        if quantity <= 0:
+            continue
+        action = {
+            "type": "raise_or_replace_protective_stop",
+            "symbol": symbol,
+            "quantity": quantity,
+            "current_stop_price": round(float(position["stop_price"]), 2),
+            "new_stop_price": new_stop,
+            "reason": reason,
+            "order_type": config["execution"]["protective_stop_order_type"],
+            "time_in_force": config["execution"]["protective_stop_time_in_force"],
+            "protective_stop_order_id": stop_order.get("id") if stop_order else position.get("protective_stop_order_id"),
+            "requires_cancel_replace": True,
+        }
+        actions.append(action)
+        events.append(
+            event(
+                "protective_stop_ratchet_planned",
+                "Protective stop ratchet planned.",
+                symbol=symbol,
+                price=price,
+                current_stop=round(float(position["stop_price"]), 2),
+                new_stop=new_stop,
+                reason=reason,
+            )
+        )
+    return events, actions
 
 
 def planned_open_risk_dollars(state: dict[str, Any], account: dict[str, Any]) -> float:
@@ -377,6 +504,7 @@ def handle_buy_fill(
         "quantity": quantity,
         "entry_price": entry,
         "stop_price": stop,
+        "initial_stop_price": stop,
         "target_price": target,
         "partial_target_price": partial_target,
         "highest_price": entry,
@@ -474,6 +602,10 @@ def monitor_active_position(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     events = detect_price_events(state, quotes, config)
     actions: list[dict[str, Any]] = []
+    target_symbols = {item["details"]["symbol"] for item in events if item["kind"] == "target_reached"}
+    ratchet_events, ratchet_actions = ratchet_protective_stops(state, quotes, config, target_symbols)
+    events.extend(ratchet_events)
+    actions.extend(ratchet_actions)
     for target_event in [item for item in events if item["kind"] == "target_reached"]:
         symbol = target_event["details"]["symbol"]
         position = next((item for item in tracked_positions(state) if item.get("symbol") == symbol), None)

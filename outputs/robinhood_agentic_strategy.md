@@ -112,9 +112,13 @@ Before any Robinhood order review:
 - Before a profit sell, cancel, reduce, or replace the existing protective stop as needed to avoid conflicting sell orders.
 - After any partial profit sell, replace or resize the protective stop for the remaining shares.
 - If stop cancel/replacement or target sell fails, pause new buys and notify immediately.
-- Trail the remaining position using the tighter operational review of:
-  - 8% trailing stop from the highest close since entry.
-  - Close below the 20-day moving average.
+- Protective stops may be raised while a position is winning:
+  - Never lower a protective stop.
+  - Do not ratchet during the first 30 minutes after entry.
+  - Move the stop to breakeven after price reaches at least 0.75R.
+  - After price reaches at least 1R, trail using 8% below the highest observed price since entry when that produces a meaningfully higher stop.
+  - Require at least a 0.5% stop increase and keep the stop at least 1% below current price to reduce noisy cancel/replace churn.
+  - If broker stop cancel/replacement fails, pause new buys and notify immediately.
 - Profit-target sells do not count against the 2 automatic new buys/day cap.
 - Existing position exits may still be reviewed when the market filter is off.
 

@@ -200,7 +200,13 @@
     "profit_target_order_type": "limit",
     "profit_target_default_action": "dynamic_partial_full_or_trail",
     "profit_target_partial_sell_pct": 50.0,
+    "protective_stop_ratchet_enabled": true,
+    "breakeven_stop_trigger_r_multiple": 0.75,
+    "trail_stop_trigger_r_multiple": 1.0,
     "trailing_stop_pct": 8.0,
+    "min_stop_raise_pct": 0.5,
+    "min_stop_below_current_price_pct": 1.0,
+    "min_minutes_before_stop_ratchet": 30,
     "drawdown_pause_pct": 10.0,
     "funding_minimum_standard_usd": 5000.0,
     "funding_maximum_standard_usd": 25000.0

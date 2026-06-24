@@ -154,6 +154,13 @@ For each action:
   - Place a new protective stop for remaining shares.
   - If replacement fails, pause new buys and notify immediately.
 
+- `raise_or_replace_protective_stop`
+  - Use only when the monitor proposes a higher `new_stop_price`; never lower an existing protective stop.
+  - Resolve the current broker-side stop from `protective_stop_order_id` or open stop orders for the symbol.
+  - Call `cancel_equity_order` for the old stop, then call `review_equity_order` and `place_equity_order` for a new GTC stop-market sell at `new_stop_price`.
+  - Keep the new stop at least the configured minimum distance below current price and require the configured minimum raise over the old stop.
+  - If cancel or replacement fails, pause new buys, keep monitoring the exposed position, and notify immediately.
+
 ## Adaptive Schedule
 
 Use one thread heartbeat for the live orchestrator:

@@ -45,6 +45,7 @@ The adapter must call broker-side review/simulation before any order and must ho
 - 5% daily loss stop.
 - One open position under $5k.
 - Protective stop after every fill.
+- Protective stop ratchet: breakeven after 0.75R, then 8% trailing from the high-water mark after 1R, never lowering stops.
 - Synthetic target guardrails.
 - Manual activity pause.
 

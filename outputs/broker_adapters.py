@@ -84,6 +84,7 @@ class MockBrokerAdapter:
             "cancel_or_reduce_protective_stop",
             "replace_stop_for_remaining_quantity",
             "raise_or_maintain_trailing_stop",
+            "raise_or_replace_protective_stop",
         }:
             return {"status": "ok", "action": action}
         if action_type == "place_profit_limit_sell":

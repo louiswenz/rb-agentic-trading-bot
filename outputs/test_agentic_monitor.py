@@ -8,6 +8,7 @@ import pathlib
 import sys
 import unittest
 from copy import deepcopy
+from datetime import datetime, timezone
 
 
 OUTPUTS = pathlib.Path(__file__).resolve().parent
@@ -161,6 +162,112 @@ class AgenticMonitorTests(unittest.TestCase):
         )
 
         self.assertEqual(result.next_poll_seconds, 900)
+        self.assertEqual(result.actions, [])
+
+    def test_profitable_position_ratchets_stop_to_breakeven(self) -> None:
+        position = {
+            "symbol": "AMD",
+            "quantity": 10,
+            "entry_price": 100.0,
+            "initial_stop_price": 92.0,
+            "stop_price": 92.0,
+            "target_price": 112.0,
+        }
+
+        result = self.run_monitor(
+            account=base_account(position),
+            orders=[
+                {
+                    "id": "stop-1",
+                    "symbol": "AMD",
+                    "side": "sell",
+                    "trigger": "stop",
+                    "state": "confirmed",
+                    "quantity": 10,
+                    "stop_price": 92.0,
+                }
+            ],
+            quotes={
+                "AMD": {"price": 106.0, "trend_score": 0.3},
+                "SPY": {"price": 600.0, "trend_score": 1.0},
+                "VIX": {"price": 16.0},
+            },
+            mode="position",
+        )
+
+        self.assertIn("protective_stop_ratchet_planned", [item["kind"] for item in result.events])
+        self.assertEqual(result.actions[0]["type"], "raise_or_replace_protective_stop")
+        self.assertEqual(result.actions[0]["new_stop_price"], 100.0)
+        self.assertEqual(result.actions[0]["protective_stop_order_id"], "stop-1")
+
+    def test_profitable_position_trails_from_high_watermark(self) -> None:
+        position = {
+            "symbol": "AMD",
+            "quantity": 10,
+            "entry_price": 100.0,
+            "initial_stop_price": 92.0,
+            "stop_price": 92.0,
+            "target_price": 120.0,
+            "highest_price": 112.0,
+        }
+
+        result = self.run_monitor(
+            account=base_account(position),
+            orders=[
+                {
+                    "id": "stop-1",
+                    "symbol": "AMD",
+                    "side": "sell",
+                    "trigger": "stop",
+                    "state": "confirmed",
+                    "quantity": 10,
+                    "stop_price": 92.0,
+                }
+            ],
+            quotes={
+                "AMD": {"price": 110.0, "trend_score": 0.8},
+                "SPY": {"price": 600.0, "trend_score": 1.0},
+                "VIX": {"price": 16.0},
+            },
+            mode="position",
+        )
+
+        self.assertEqual(result.actions[0]["type"], "raise_or_replace_protective_stop")
+        self.assertEqual(result.actions[0]["new_stop_price"], 103.04)
+        self.assertEqual(result.actions[0]["reason"], "trailing_high_watermark")
+
+    def test_stop_ratchet_skips_first_thirty_minutes_after_entry(self) -> None:
+        position = {
+            "symbol": "AMD",
+            "quantity": 10,
+            "entry_price": 100.0,
+            "initial_stop_price": 92.0,
+            "stop_price": 92.0,
+            "target_price": 120.0,
+            "opened_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        result = self.run_monitor(
+            account=base_account(position),
+            orders=[
+                {
+                    "id": "stop-1",
+                    "symbol": "AMD",
+                    "side": "sell",
+                    "trigger": "stop",
+                    "state": "confirmed",
+                    "quantity": 10,
+                    "stop_price": 92.0,
+                }
+            ],
+            quotes={
+                "AMD": {"price": 110.0, "trend_score": 0.8},
+                "SPY": {"price": 600.0, "trend_score": 1.0},
+                "VIX": {"price": 16.0},
+            },
+            mode="position",
+        )
+
         self.assertEqual(result.actions, [])
 
     def test_manual_activity_pauses_new_buys(self) -> None:
