@@ -3,7 +3,7 @@
 
 Input data:
   One CSV per symbol in a prices directory, named SYMBOL.csv.
-  Required columns: Date, Open, High, Low, Close.
+  Required columns: Date, Open, High, Low, Close. Optional: Volume.
 
 Example:
   python3 swing_strategy.py \
@@ -37,6 +37,7 @@ class Bar:
     high: float
     low: float
     close: float
+    volume: float | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,9 @@ class Candidate:
     reward_risk_ratio: float
     sector_group: str
     relative_strength_pct: float
+    volume_ratio: float | None
+    atr: float | None
+    stop_method: str
     news_score: float
     combined_rank_score: float
     news_summary: str
@@ -85,6 +89,7 @@ def load_bars(path: Path) -> list[Bar]:
                 high=float(row["High"]),
                 low=float(row["Low"]),
                 close=float(row["Close"]),
+                volume=float(row["Volume"]) if row.get("Volume") not in (None, "") else None,
             )
             for row in reader
             if row.get("Close")
@@ -98,6 +103,41 @@ def sma(values: list[float], days: int) -> float | None:
     if len(values) < days:
         return None
     return sum(values[-days:]) / days
+
+
+def average(values: list[float], days: int) -> float | None:
+    if len(values) < days:
+        return None
+    return sum(values[-days:]) / days
+
+
+def true_ranges(bars: list[Bar]) -> list[float]:
+    ranges: list[float] = []
+    for index, bar in enumerate(bars):
+        if index == 0:
+            ranges.append(bar.high - bar.low)
+            continue
+        previous_close = bars[index - 1].close
+        ranges.append(max(bar.high - bar.low, abs(bar.high - previous_close), abs(bar.low - previous_close)))
+    return ranges
+
+
+def atr(bars: list[Bar], days: int) -> float | None:
+    if len(bars) < days + 1:
+        return None
+    return average(true_ranges(bars), days)
+
+
+def volume_ratio(bars: list[Bar], days: int) -> float | None:
+    if len(bars) < days + 1 or bars[-1].volume is None:
+        return None
+    prior_volumes = [bar.volume for bar in bars[-days - 1 : -1] if bar.volume is not None]
+    if len(prior_volumes) < days:
+        return None
+    avg_volume = sum(prior_volumes) / days
+    if avg_volume <= 0:
+        return None
+    return bars[-1].volume / avg_volume
 
 
 def percent_change(new: float, old: float) -> float:
@@ -123,6 +163,30 @@ def has_pullback_or_consolidation(bars: list[Bar], lookback: int) -> bool:
     had_pullback = any(closes[i] < closes[i - 1] for i in range(1, len(closes)))
     had_consolidation = range_pct <= 4.0
     return had_pullback or had_consolidation
+
+
+def candidate_stop(latest: Bar, bars: list[Bar], config: dict[str, Any]) -> tuple[float, str, float | None]:
+    risk = config["risk"]
+    swing_days = int(config["strategy"]["recent_swing_low_days"])
+    recent_low = min(bar.low for bar in bars[-swing_days:])
+    percent_stop = latest.close * (1.0 - float(risk["initial_stop_pct"]) / 100.0)
+    legacy_stop = min(percent_stop, recent_low)
+
+    atr_config = risk.get("atr_stop", {})
+    if not atr_config.get("enabled", False):
+        return legacy_stop, "percent_or_recent_low", None
+
+    atr_value = atr(bars, int(atr_config.get("days", 14)))
+    if atr_value is None:
+        return legacy_stop, "percent_or_recent_low_atr_unavailable", None
+
+    atr_stop = latest.close - (float(atr_config.get("multiple", 2.0)) * atr_value)
+    mode = str(atr_config.get("mode", "tighter_of_legacy_and_atr"))
+    if mode == "atr_only":
+        return atr_stop, "atr", atr_value
+    if mode == "wider_of_legacy_and_atr":
+        return min(legacy_stop, atr_stop), "wider_of_percent_recent_low_and_atr", atr_value
+    return max(legacy_stop, atr_stop), "tighter_of_percent_recent_low_and_atr", atr_value
 
 
 def position_size(
@@ -335,9 +399,15 @@ def scan_symbol(
     if not has_pullback_or_consolidation(bars, int(strategy["pullback_lookback_days"])):
         return None
 
-    recent_low = min(bar.low for bar in bars[-swing_days:])
-    percent_stop = latest.close * (1.0 - float(risk["initial_stop_pct"]) / 100.0)
-    stop = min(percent_stop, recent_low)
+    volume_config = strategy.get("volume_confirmation", {})
+    latest_volume_ratio = volume_ratio(bars, int(volume_config.get("lookback_days", 20)))
+    if volume_config.get("enabled", False):
+        if latest_volume_ratio is None:
+            return None
+        if latest_volume_ratio < float(volume_config.get("min_ratio", 1.2)):
+            return None
+
+    stop, stop_method, atr_value = candidate_stop(latest, bars, config)
     stop_distance_pct = percent_distance(latest.close, stop)
     if stop_distance_pct < float(risk["min_stop_pct"]) or stop_distance_pct > float(risk["max_stop_pct"]):
         return None
@@ -371,10 +441,12 @@ def scan_symbol(
         f"above 50/200-day averages, +{relative_strength:.2f}% 20-day RS vs SPY, "
         "close above prior high after pullback/consolidation"
     )
+    if latest_volume_ratio is not None:
+        reason = f"{reason}; volume {latest_volume_ratio:.2f}x 20-day average"
     if strategy.get("news_filter", {}).get("enabled", False):
         reason = f"{reason}; news score {news_score:g} ({news_summary})"
     exit_plan = (
-        f"initial stop {stop:.2f}; consider partial profit at "
+        f"initial {stop_method} stop {stop:.2f}; consider partial profit at "
         f"{partial_target:.2f} (1R); target {profit_target:.2f} "
         f"({float(risk['synthetic_profit_target_r_multiple']):g}R); "
         f"trail remainder by {float(risk['trailing_stop_pct']):g}% or a close below the 20-day average"
@@ -394,6 +466,9 @@ def scan_symbol(
         reward_risk_ratio=reward_risk_ratio,
         sector_group=symbol_group(symbol, config),
         relative_strength_pct=relative_strength,
+        volume_ratio=latest_volume_ratio,
+        atr=atr_value,
+        stop_method=stop_method,
         news_score=news_score,
         combined_rank_score=combined_rank_score,
         news_summary=news_summary,
@@ -437,6 +512,81 @@ def add_vix_context(output: dict[str, Any], prices_dir: Path, config: dict[str, 
         )
     else:
         output["messages"].append(f"VIX context: {latest.close:.2f}, below caution threshold.")
+
+
+def market_regime_allows_new_buys(output: dict[str, Any], prices_dir: Path, config: dict[str, Any]) -> bool:
+    regime = config["strategy"].get("market_regime_filter", {})
+    if not regime.get("enabled", False):
+        return True
+
+    sma_days = int(regime.get("sma_days", config["strategy"]["market_filter_sma_days"]))
+    for symbol in regime.get("required_symbols_above_sma", ["SPY"]):
+        path = prices_dir / f"{symbol}.csv"
+        if not path.exists():
+            output["messages"].append(f"New long trades blocked: market regime file missing for {symbol}.")
+            return False
+        bars = load_bars(path)
+        moving_average = sma([bar.close for bar in bars], sma_days)
+        if moving_average is None:
+            output["messages"].append(f"New long trades blocked: not enough {symbol} history for market regime.")
+            return False
+        if bars[-1].close <= moving_average:
+            output["messages"].append(
+                f"New long trades blocked: {symbol} is not above its {sma_days}-day moving average."
+            )
+            return False
+        output["messages"].append(
+            f"Market regime OK: {symbol} {bars[-1].close:.2f} above {sma_days}-day SMA {moving_average:.2f}."
+        )
+    return True
+
+
+def validate_fresh_price_history(output: dict[str, Any], prices_dir: Path, config: dict[str, Any]) -> bool:
+    freshness = config.get("data_freshness", {})
+    if not freshness:
+        return True
+
+    strategy = config["strategy"]
+    benchmark = strategy["benchmark_symbol"]
+    benchmark_path = prices_dir / f"{benchmark}.csv"
+    if not benchmark_path.exists():
+        output["messages"].append(f"New trades blocked: benchmark history missing for {benchmark}.")
+        return False
+
+    benchmark_bars = load_bars(benchmark_path)
+    if not benchmark_bars:
+        output["messages"].append(f"New trades blocked: benchmark history empty for {benchmark}.")
+        return False
+
+    benchmark_date = date.fromisoformat(benchmark_bars[-1].date)
+    min_bars = int(freshness.get("min_daily_bars", 201))
+    max_age = int(freshness.get("max_history_age_calendar_days", 1))
+    excluded = {str(symbol).upper() for symbol in strategy.get("excluded_symbols", [])}
+    invalid: list[str] = []
+
+    for raw_symbol in strategy["trade_universe"]:
+        symbol = str(raw_symbol).upper()
+        if symbol in excluded:
+            continue
+        path = prices_dir / f"{symbol}.csv"
+        if not path.exists():
+            invalid.append(f"{symbol}: missing file")
+            continue
+        bars = load_bars(path)
+        if len(bars) < min_bars:
+            invalid.append(f"{symbol}: only {len(bars)} bars")
+            continue
+        latest_date = date.fromisoformat(bars[-1].date)
+        if (benchmark_date - latest_date).days > max_age:
+            invalid.append(f"{symbol}: stale latest bar {bars[-1].date}")
+
+    if invalid:
+        output["messages"].append(
+            "Symbols ineligible after history refresh because data is stale or insufficient: " + "; ".join(invalid)
+        )
+        return True
+    output["messages"].append(f"Price history freshness OK: full universe through {benchmark_bars[-1].date}.")
+    return True
 
 
 def revalidate_candidate(
@@ -490,6 +640,9 @@ def revalidate_candidate(
         reward_risk_ratio=reward_risk_ratio,
         sector_group=candidate.sector_group,
         relative_strength_pct=candidate.relative_strength_pct,
+        volume_ratio=candidate.volume_ratio,
+        atr=candidate.atr,
+        stop_method=candidate.stop_method,
         news_score=candidate.news_score,
         combined_rank_score=candidate.combined_rank_score,
         news_summary=candidate.news_summary,
@@ -566,6 +719,9 @@ def main() -> int:
         return emit(output, args.json)
 
     add_vix_context(output, prices_dir, config)
+    if not validate_fresh_price_history(output, prices_dir, config):
+        output["status"] = "price_history_invalid"
+        return emit(output, args.json)
 
     max_positions = int(risk["max_positions_standard"])
     if args.account_value < float(risk["funding_minimum_standard_usd"]):
@@ -587,13 +743,12 @@ def main() -> int:
         f"Open-risk budget: ${remaining_open_risk:.2f} remaining of ${total_open_risk_cap:.2f} total cap."
     )
 
+    if not market_regime_allows_new_buys(output, prices_dir, config):
+        output["status"] = "market_filter_off"
+        return emit(output, args.json)
+
     benchmark = strategy["benchmark_symbol"]
     spy_bars = load_bars(prices_dir / f"{benchmark}.csv")
-    spy_sma50 = sma([bar.close for bar in spy_bars], int(strategy["market_filter_sma_days"]))
-    if spy_sma50 is None or spy_bars[-1].close <= spy_sma50:
-        output["status"] = "market_filter_off"
-        output["messages"].append("New long trades blocked: SPY is not above its 50-day moving average.")
-        return emit(output, args.json)
 
     symbols = list(strategy["trade_universe"])
     if args.account_value < float(risk["funding_minimum_standard_usd"]) and bool(risk["under_5000_prefer_etfs"]):
@@ -675,6 +830,9 @@ def main() -> int:
             "target_price": round(item.profit_target, 2),
             "reward_risk_ratio": round(item.reward_risk_ratio, 2),
             "relative_strength_pct": round(item.relative_strength_pct, 2),
+            "volume_ratio": round(item.volume_ratio, 2) if item.volume_ratio is not None else None,
+            "atr": round(item.atr, 2) if item.atr is not None else None,
+            "stop_method": item.stop_method,
             "news_score": round(item.news_score, 2),
             "news_summary": item.news_summary,
             "combined_rank_score": round(item.combined_rank_score, 2),
@@ -752,8 +910,10 @@ def emit(output: dict[str, Any], as_json: bool) -> int:
         )
         print(
             f"  Rank inputs: RS {item['relative_strength_pct']}% | "
+            f"Volume {item['volume_ratio'] if item['volume_ratio'] is not None else 'n/a'}x | "
             f"News {item['news_score']} | Combined {item['combined_rank_score']}"
         )
+        print(f"  Stop method: {item['stop_method']} | ATR: {item['atr'] if item['atr'] is not None else 'n/a'}")
         print(f"  News: {item['news_summary']}")
         print(f"  Exit plan: {item['exit_plan']}")
         print(f"  Order instruction: {item['order_instruction']}")

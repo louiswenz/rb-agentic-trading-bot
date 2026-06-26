@@ -85,7 +85,7 @@ When available, include `days_until_earnings`, `next_earnings_date`, or `earning
 
 ### Historical Price CSV Phase
 
-For premarket candidate generation, `swing_strategy.py` requires one daily OHLC CSV per symbol. Refresh the configured universe before scanning so expanded symbols are evaluated instead of skipped for missing `SYMBOL.csv` files:
+For every candidate-generation run, `swing_strategy.py` requires one fresh daily OHLC CSV per configured symbol. Treat `outputs/strategy_config.json:data_freshness.refresh_price_history_before_candidate_scan=true` as a hard pre-scan rule: refresh the full configured universe before scanning so expanded symbols are evaluated instead of skipped for missing or stale `SYMBOL.csv` files.
 
 ```bash
 python3 outputs/refresh_price_history.py \
@@ -94,7 +94,7 @@ python3 outputs/refresh_price_history.py \
   --raw-dir work/agentic_price_history_raw
 ```
 
-This public-history refresh writes only local daily `Date,Open,High,Low,Close` files. It must not be used for live entry validation; continue to use Robinhood `get_equity_quotes` for live prices and max-entry checks.
+This public-history refresh writes only local daily `Date,Open,High,Low,Close` files. It must not be used for live entry validation; continue to use Robinhood `get_equity_quotes` for live prices and max-entry checks. After refresh, verify every non-excluded universe symbol has at least the configured minimum daily bars and that the latest bar is no older than `data_freshness.max_history_age_calendar_days`, allowing weekends and market holidays.
 
 If public history is unavailable or stale, use the broker-consistent fallback:
 
@@ -111,7 +111,7 @@ python3 outputs/robinhood_historicals_to_prices.py \
 
 5. Run `swing_strategy.py --prices-dir work/agentic_price_history ...`.
 
-Both converters write only `Date,Open,High,Low,Close` and skip any symbol with fewer than 201 real daily bars. If required technical history is still missing after the refresh and fallback, create no candidates; missing data remains a no-trade condition.
+Both converters write only scanner OHLCV columns and skip any symbol with fewer than the configured minimum real daily bars. If a symbol's technical history is still missing or stale after the public refresh and broker fallback, mark that symbol ineligible and report the data condition; do not silently skip it. If benchmark or market-regime history is missing or stale, create no new-buy candidates because market context is required.
 
 ### Monitor Phase
 
@@ -165,9 +165,10 @@ For each action:
 
 Use one thread heartbeat for the live orchestrator:
 
-- Candidate scans: separate cron automation at 6:00 AM PT and 10:00 AM PT on weekdays. Both runs may create/update pending candidates only and must not review, place, cancel, or modify orders.
+- Candidate scans: separate cron automation at 6:00 AM PT, 10:00 AM PT, and 5:00 PM PT on weekdays. All candidate-scan runs may create/update pending candidates only and must not review, place, cancel, or modify orders.
 - Premarket candidate scan: 6:00 AM PT, 30 minutes before regular market open.
 - Intraday candidate scan: 10:00 AM PT, using current account constraints, held symbols, live prices, and open-risk budget.
+- After-close candidate scan: 5:00 PM PT, candidate-only. It must refresh full-universe daily OHLC history and may update pending candidates for next-session validation, but it must not perform broker order actions.
 - Schedule mode: regular market hours only.
 - Regular market window: 6:30 AM to 1:00 PM PT, Monday through Friday, excluding market holidays.
 - Current single-heartbeat envelope: weekdays at 15-minute marks from 6:00 AM through 1:45 PM PT, with mandatory quiet no-op at 6:00, 6:15, 1:15, 1:30, and 1:45 unless unresolved protective-stop or open-order risk exists. At or shortly after 10:00 AM PT, the heartbeat may run the candidate scanner only if the dedicated scanner automation has not already recorded the current 10:00 AM scan. This envelope is used because this thread supports only one active heartbeat automation.

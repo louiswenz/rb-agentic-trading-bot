@@ -48,7 +48,17 @@ class RobinhoodHistoricalsToPricesTests(unittest.TestCase):
             with csv_path.open("r", newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
 
-            self.assertEqual(rows[0], {"Date": "2026-01-01", "Open": "100.000000", "High": "102.000000", "Low": "99.000000", "Close": "101.000000"})
+            self.assertEqual(
+                rows[0],
+                {
+                    "Date": "2026-01-01",
+                    "Open": "100.000000",
+                    "High": "102.000000",
+                    "Low": "99.000000",
+                    "Close": "101.000000",
+                    "Volume": "1000",
+                },
+            )
             self.assertEqual(rows[-1]["Date"], "2026-01-03")
 
     def test_convert_skips_symbols_without_minimum_history(self) -> None:

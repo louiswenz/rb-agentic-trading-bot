@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 
-CSV_COLUMNS = ["Date", "Open", "High", "Low", "Close"]
+CSV_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume"]
 
 
 def load_universe(config_path: Path) -> list[str]:
@@ -84,6 +84,7 @@ def rows_from_yahoo_chart(symbol: str, data: dict[str, Any]) -> list[dict[str, s
             high_price = quote["high"][index]
             low_price = quote["low"][index]
             close_price = quote["close"][index]
+            volume = quote.get("volume", [None] * len(timestamps))[index]
         except (KeyError, IndexError, TypeError) as exc:
             raise ValueError(f"Malformed Yahoo quote bars for {symbol}") from exc
         if None in (open_price, high_price, low_price, close_price):
@@ -95,6 +96,7 @@ def rows_from_yahoo_chart(symbol: str, data: dict[str, Any]) -> list[dict[str, s
             "High": f"{float(high_price):.6f}",
             "Low": f"{float(low_price):.6f}",
             "Close": f"{float(close_price):.6f}",
+            "Volume": f"{float(volume):.0f}" if volume is not None else "",
         }
     return [rows_by_date[date] for date in sorted(rows_by_date)]
 

@@ -42,6 +42,7 @@ def test_rows_from_yahoo_chart_skips_empty_bars() -> None:
                                 "high": [11.0, None],
                                 "low": [9.5, None],
                                 "close": [10.5, None],
+                                "volume": [123456, None],
                             }
                         ]
                     },
@@ -52,13 +53,29 @@ def test_rows_from_yahoo_chart_skips_empty_bars() -> None:
     }
 
     assert refresh.rows_from_yahoo_chart("TST", payload) == [
-        {"Date": "2026-01-01", "Open": "10.000000", "High": "11.000000", "Low": "9.500000", "Close": "10.500000"}
+        {
+            "Date": "2026-01-01",
+            "Open": "10.000000",
+            "High": "11.000000",
+            "Low": "9.500000",
+            "Close": "10.500000",
+            "Volume": "123456",
+        }
     ]
 
 
 def test_write_csv() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        rows = [{"Date": "2026-01-01", "Open": "1.000000", "High": "2.000000", "Low": "0.500000", "Close": "1.500000"}]
+        rows = [
+            {
+                "Date": "2026-01-01",
+                "Open": "1.000000",
+                "High": "2.000000",
+                "Low": "0.500000",
+                "Close": "1.500000",
+                "Volume": "1000",
+            }
+        ]
         refresh.write_csv("TST", rows, Path(tmp))
 
         with (Path(tmp) / "TST.csv").open(newline="", encoding="utf-8") as handle:

@@ -7,6 +7,19 @@
     "agentic_allowed": true,
     "review_before_orders": false
   },
+  "data_freshness": {
+    "refresh_price_history_before_candidate_scan": true,
+    "refresh_full_universe": true,
+    "public_history_refresh_script": "outputs/refresh_price_history.py",
+    "broker_history_fallback_script": "outputs/robinhood_historicals_to_prices.py",
+    "price_history_dir": "work/agentic_price_history",
+    "raw_history_dir": "work/agentic_price_history_raw",
+    "min_daily_bars": 201,
+    "lookback_days": 500,
+    "max_history_age_calendar_days": 1,
+    "missing_or_stale_history_policy": "symbol_ineligible_after_refresh",
+    "use_broker_quotes_for_live_entry_validation": true
+  },
   "strategy": {
     "name": "Robinhood Agentic Swing Trading",
     "style": "concentrated_aggressive_swing",
@@ -55,6 +68,7 @@
       "PYPL",
       "HOOD",
       "CCL",
+      "NCLH",
       "DAL",
       "UAL",
       "MRK",
@@ -76,11 +90,21 @@
     "vix_high_risk_level": 35.0,
     "max_candidates": 2,
     "market_filter_sma_days": 50,
+    "market_regime_filter": {
+      "enabled": true,
+      "sma_days": 50,
+      "required_symbols_above_sma": ["SPY", "QQQ"]
+    },
     "trend_sma_days": [50, 200],
     "relative_strength_days": 20,
     "same_day_chase_limit_pct": 5.0,
     "recent_swing_low_days": 10,
     "pullback_lookback_days": 5,
+    "volume_confirmation": {
+      "enabled": true,
+      "lookback_days": 20,
+      "min_ratio": 1.2
+    },
     "next_session_max_gap_pct": 1.0,
     "adaptive_gap": {
       "enabled": true,
@@ -143,6 +167,7 @@
         "PYPL": "financials",
         "HOOD": "financials",
         "CCL": "travel",
+        "NCLH": "travel",
         "DAL": "airlines",
         "UAL": "airlines",
         "OXY": "energy",
@@ -193,6 +218,12 @@
     "initial_stop_pct": 8.0,
     "min_stop_pct": 4.0,
     "max_stop_pct": 8.0,
+    "atr_stop": {
+      "enabled": true,
+      "days": 14,
+      "multiple": 2.0,
+      "mode": "tighter_of_legacy_and_atr"
+    },
     "total_open_risk_pct": 6.0,
     "partial_profit_r_multiple": 1.0,
     "synthetic_profit_target_r_multiple": 1.5,
@@ -248,7 +279,8 @@
     "regular_market_close_pt": "13:00",
     "premarket_candidate_scan_time_pt": "06:00",
     "intraday_candidate_scan_time_pt": "10:00",
-    "candidate_scan_times_pt": ["06:00", "10:00"],
+    "after_close_candidate_scan_time_pt": "17:00",
+    "candidate_scan_times_pt": ["06:00", "10:00", "17:00"],
     "no_position_no_candidate_brief_time_pt": "13:30",
     "pending_candidate_validation_time_pt": "06:45",
     "open_position_poll_seconds": 900,

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 
-REQUIRED_COLUMNS = ["Date", "Open", "High", "Low", "Close"]
+REQUIRED_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume"]
 
 
 def load_snapshot(path: Path) -> dict[str, Any]:
@@ -64,6 +64,7 @@ def normalize_bars(item: dict[str, Any]) -> list[dict[str, str]]:
             "High": f"{parse_float(bar, 'high_price'):.6f}",
             "Low": f"{parse_float(bar, 'low_price'):.6f}",
             "Close": f"{parse_float(bar, 'close_price'):.6f}",
+            "Volume": f"{float(bar.get('volume', 0) or 0):.0f}",
         }
     return [rows_by_date[date] for date in sorted(rows_by_date)]
 
