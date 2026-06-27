@@ -91,10 +91,11 @@ Before any Robinhood order review:
 - No position / no candidate: quiet during the market-hours heartbeat unless an event occurs.
 - Premarket candidate picking: 6:00 AM PT on weekdays, pending candidates only.
 - Intraday candidate rediscovery: 10:00 AM PT on weekdays, pending candidates only.
-- Pending candidate: one morning validation event at 6:45 AM PT / 9:45 AM ET if actionable.
-- Open position: silent checks every 15 minutes during regular market hours.
-- Active order, first 30 minutes after entry, or within 1% of stop/target: keep the 15-minute market-hours heartbeat and notify only on meaningful state changes.
-- Daily after-close brief: not scheduled in market-hours-only mode.
+- After-close candidate picking: 5:00 PM PT on weekdays, pending candidates only for next-session validation.
+- Pending candidate: first morning validation event at 7:00 AM PT / 10:00 AM ET if actionable.
+- Open position: silent checks every hour during regular market hours.
+- Active order, first 30 minutes after entry, or within 1% of stop/target: keep the hourly market-hours heartbeat and notify only on meaningful state changes.
+- Daily after-close brief: only when separately scheduled.
 - Polls stay quiet unless a meaningful event occurs.
 
 ## Exit Rules

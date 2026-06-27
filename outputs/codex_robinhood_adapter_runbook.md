@@ -44,9 +44,9 @@ Use read-only Robinhood tools:
 - `get_portfolio`: equity, buying power, cash, asset values.
 - `get_equity_positions`: open stock/ETF positions.
 - `get_equity_orders`: open/recent orders.
-- `get_equity_quotes`: live quotes for active position, pending candidates, `SPY`, and tradeable symbols.
+- `get_equity_quotes`: live quotes for active positions, pending candidates, `SPY`, `QQQ`, `VIX`, and required risk/context symbols.
 - `get_equity_historicals`: daily regular-hours OHLCV bars for the benchmark and trade-universe symbols.
-- Latest stock news snapshot for each trade-universe symbol when available from connected tools or approved web/news sources.
+- Latest stock news snapshot for deterministic prescreen survivors and active holdings with risk events when available from connected tools or approved web/news sources.
 
 Normalize snapshots into:
 
@@ -66,7 +66,23 @@ Normalize snapshots into:
 }
 ```
 
-For daily candidate generation, pass the news snapshot into `swing_strategy.py` with `--news-json`. The snapshot is keyed by symbol and may include:
+For token-efficient daily candidate generation, first run the deterministic prescreen without news:
+
+```bash
+python3 outputs/swing_strategy.py \
+  --config outputs/strategy_config.json \
+  --prices-dir work/agentic_price_history \
+  --account-value ACCOUNT_VALUE \
+  --settled-cash SETTLED_CASH \
+  --monthly-start-equity MONTHLY_START_EQUITY \
+  --positions-count POSITIONS_COUNT \
+  --held-symbols HELD_SYMBOLS_JSON \
+  --open-risk-dollars OPEN_RISK_DOLLARS \
+  --prescreen-news-symbols-only \
+  --json
+```
+
+Collect or summarize stock-specific news only for the returned `news_collection_symbols`, plus active holdings with risk events. Then pass that smaller news snapshot into `swing_strategy.py` with `--news-json`. The snapshot is keyed by symbol and may include:
 
 ```json
 {
@@ -119,7 +135,7 @@ Run `agentic_monitor.py` with the normalized snapshots and any pending candidate
 
 - `events`: meaningful changes to report.
 - `actions`: broker actions to execute.
-- `next_poll_seconds`: `900`, `60`, or `null`.
+- `next_poll_seconds`: `3600` or `null`.
 - `daily_brief`: compact after-close summary.
 - `state`: updated local strategy state.
 
@@ -171,14 +187,14 @@ Use one thread heartbeat for the live orchestrator:
 - After-close candidate scan: 5:00 PM PT, candidate-only. It must refresh full-universe daily OHLC history and may update pending candidates for next-session validation, but it must not perform broker order actions.
 - Schedule mode: regular market hours only.
 - Regular market window: 6:30 AM to 1:00 PM PT, Monday through Friday, excluding market holidays.
-- Current single-heartbeat envelope: weekdays at 15-minute marks from 6:00 AM through 1:45 PM PT, with mandatory quiet no-op at 6:00, 6:15, 1:15, 1:30, and 1:45 unless unresolved protective-stop or open-order risk exists. At or shortly after 10:00 AM PT, the heartbeat may run the candidate scanner only if the dedicated scanner automation has not already recorded the current 10:00 AM scan. This envelope is used because this thread supports only one active heartbeat automation.
-- Normal cadence: every 15 minutes during the regular market window when a position is open or pending candidate requires validation.
-- Elevated states: keep the 15-minute heartbeat when an order is active, first 30 minutes after entry, or price is within 1% of stop/target; notify only on meaningful state changes.
-- Morning validation: run at or after 6:45 AM PT / 9:45 AM ET when a pending candidate exists.
-- After-close scan/brief: not scheduled while market-hours-only mode is active. Add a separate after-close automation if you want candidate generation and daily brief outside regular hours.
+- Current single-heartbeat envelope: weekdays at 6:00, 7:00, 8:00, 9:00, 10:00, 11:00, 12:00, 1:00, and 5:00 PT. The 6:00 and 5:00 runs are candidate-only; the 10:00 run may combine live monitoring and candidate rediscovery if the slot has not already been recorded.
+- Normal cadence: every 1 hour during the regular market window when a position is open or pending candidate requires validation.
+- Elevated states: keep the 1-hour heartbeat when an order is active, first 30 minutes after entry, or price is within 1% of stop/target; notify only on meaningful state changes.
+- Morning validation: run at or after 7:00 AM PT / 10:00 AM ET when a pending candidate exists.
+- After-close scan/brief: 5:00 PM PT weekdays, candidate-only. It may refresh history and update pending candidates for the next session, but it must not place, cancel, or modify broker orders.
 - Outside market windows: no-op unless an order/position risk event is unresolved.
 
-The orchestrator should keep the heartbeat cadence at 15 minutes. Do not request a one-minute cadence; elevated states are handled by the same 15-minute market-hours run plus event notifications.
+The orchestrator should keep the heartbeat cadence at 1 hour. Do not request a one-minute or 15-minute cadence unless the user explicitly changes the schedule; elevated states are handled by the same hourly market-hours run plus event notifications.
 
 ## Notifications
 

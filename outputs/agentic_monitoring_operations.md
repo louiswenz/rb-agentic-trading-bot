@@ -16,15 +16,15 @@ The local scripts do not directly submit Robinhood orders. Live trading is handl
 |---|---:|---|
 | Premarket candidate picking | 6:00 AM PT weekdays | Notify only if actionable candidates or failures |
 | No position / no candidate | Market-hours heartbeat only | Quiet no-op unless event |
-| Pending candidate | 6:45 AM PT next session | Notify only if actionable |
-| Open position | Every 15 minutes during regular hours | Silent unless event |
-| Active order | Every 15 minutes | Notify on state changes |
-| Within 1% of stop or target | Every 15 minutes | Notify on risk/action events |
-| Daily brief | 1:30 PM PT after close | Compact table |
+| Pending candidate | 7:00 AM PT next session | Notify only if actionable |
+| Open position | Every hour during regular hours | Silent unless event |
+| Active order | Every hour | Notify on state changes |
+| Within 1% of stop or target | Every hour | Notify on risk/action events |
+| After-close candidate picking | 5:00 PM PT weekdays | Candidate-only; no broker order actions |
 
-Premarket candidate picking runs as a separate cron automation at 6:00 AM PT on weekdays, 30 minutes before regular market open. It can create or update pending candidates only; it must not submit, review, cancel, or modify orders.
+Candidate picking runs as a separate cron automation at 6:00 AM, 10:00 AM, and 5:00 PM PT on weekdays. It can create or update pending candidates only; it must not submit, review, cancel, or modify orders. Candidate discovery uses deterministic technical/risk prescreening before collecting news for the smaller survivor set.
 
-The Codex live adapter uses one 15-minute heartbeat for market-hours monitoring and execution. The current schedule is regular-market-hours-only: 6:30 AM to 1:00 PM PT on weekdays, excluding market holidays. Because this thread supports only one active heartbeat automation, the saved schedule uses a 15-minute market-hours envelope from 6:00 AM through 1:45 PM PT and the prompt must quietly no-op at 6:00, 6:15, 1:15, 1:30, and 1:45 unless unresolved protective-stop or open-order risk exists. Elevated order/stop/target states still use the same 15-minute heartbeat and notify only on meaningful state changes.
+The Codex live adapter uses one hourly heartbeat for market-hours monitoring and execution. The current schedule is regular-market-hours-only: 6:30 AM to 1:00 PM PT on weekdays, excluding market holidays. The saved heartbeat runs at 6:00, 7:00, 8:00, 9:00, 10:00, 11:00, 12:00, 1:00, and 5:00 PT. The 6:00 and 5:00 runs are candidate-only; elevated order/stop/target states still use the same hourly heartbeat and notify only on meaningful state changes.
 
 Live adapter state lives at `work/agentic_live_adapter_state.json`. It uses the Agentic account selector and standing authorization scope; the full account number is resolved by Codex via Robinhood tools and must remain out of user-facing output.
 
@@ -34,7 +34,7 @@ Live adapter state lives at `work/agentic_live_adapter_state.json`. It uses the 
 
 - `--account-json`: account snapshot with equity, buying power, and positions.
 - `--orders-json`: current order snapshot.
-- `--quotes-json`: live quote snapshot for position, pending candidates, `SPY`, and `VIX`.
+- `--quotes-json`: live quote snapshot for active positions, pending candidates, `SPY`, `QQQ`, `VIX`, and required risk/context symbols.
 - `--candidates-json`: pending candidates from the scanner.
 - `--state`: persistent monitor state file.
 
@@ -42,8 +42,8 @@ Live adapter state lives at `work/agentic_live_adapter_state.json`. It uses the 
 
 - `events`: meaningful changes worth notifying or recording.
 - `actions`: broker actions a Robinhood adapter should review/submit.
-- `next_poll_seconds`: `900` or `null`.
-- `daily_brief`: compact after-close summary only if a separate after-close run is added later.
+- `next_poll_seconds`: `3600` or `null`.
+- `daily_brief`: compact after-close summary when scheduled separately.
 - `state`: updated persistent state.
 
 ## Safety Behavior

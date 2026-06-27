@@ -78,6 +78,18 @@ class StrategyConfigUniverseTests(unittest.TestCase):
 
         self.assertIsNone(candidate)
 
+    def test_hourly_schedule_and_token_efficiency_defaults(self) -> None:
+        monitoring = self.config["monitoring"]
+        token_efficiency = self.config["token_efficiency"]
+
+        self.assertEqual(monitoring["candidate_scan_times_pt"], ["06:00", "10:00", "17:00"])
+        self.assertEqual(monitoring["pending_candidate_validation_time_pt"], "07:00")
+        self.assertEqual(monitoring["open_position_poll_seconds"], 3600)
+        self.assertEqual(monitoring["elevated_poll_seconds"], 3600)
+        self.assertTrue(token_efficiency["deterministic_prescreen_before_news"])
+        self.assertEqual(token_efficiency["prescreen_news_symbol_limit"], 6)
+        self.assertEqual(token_efficiency["news_cache_ttl_hours"], 48)
+
 
 if __name__ == "__main__":
     unittest.main()

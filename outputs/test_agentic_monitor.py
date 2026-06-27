@@ -134,7 +134,7 @@ class AgenticMonitorTests(unittest.TestCase):
             mode="position",
         )
 
-        self.assertEqual(result.next_poll_seconds, 900)
+        self.assertEqual(result.next_poll_seconds, 3600)
         self.assertIn("target_reached", [item["kind"] for item in result.events])
         self.assertIn("profit_action_chosen", [item["kind"] for item in result.events])
         self.assertEqual(result.actions[0]["type"], "cancel_or_reduce_protective_stop")
@@ -161,7 +161,7 @@ class AgenticMonitorTests(unittest.TestCase):
             mode="position",
         )
 
-        self.assertEqual(result.next_poll_seconds, 900)
+        self.assertEqual(result.next_poll_seconds, 3600)
         self.assertEqual(result.actions, [])
 
     def test_profitable_position_ratchets_stop_to_breakeven(self) -> None:

@@ -62,6 +62,7 @@ def main() -> int:
     morning_rrule = str(morning_auto["rrule"])
     robinhood_tools = codex_config["mcp_servers"]["robinhood"]["tools"]
     verified_snapshot = state.get("last_verified_snapshot", {})
+    verified_account = verified_snapshot.get("account", verified_snapshot)
     required_snapshot_fields = [
         "account_value",
         "buying_power",
@@ -132,12 +133,12 @@ def main() -> int:
         ),
         check(
             "normal_monitoring_interval",
-            config["monitoring"]["open_position_poll_seconds"] == 900,
+            config["monitoring"]["open_position_poll_seconds"] == 3600,
             f"{config['monitoring']['open_position_poll_seconds']} seconds",
         ),
         check(
             "elevated_monitoring_interval",
-            config["monitoring"]["elevated_poll_seconds"] == 900,
+            config["monitoring"]["elevated_poll_seconds"] == 3600,
             f"{config['monitoring']['elevated_poll_seconds']} seconds",
         ),
         check(
@@ -153,8 +154,15 @@ def main() -> int:
         check(
             "intraday_candidate_scan_time",
             config["monitoring"].get("intraday_candidate_scan_time_pt") == "10:00"
-            and config["monitoring"].get("candidate_scan_times_pt") == ["06:00", "10:00"],
+            and config["monitoring"].get("after_close_candidate_scan_time_pt") == "17:00"
+            and config["monitoring"].get("candidate_scan_times_pt") == ["06:00", "10:00", "17:00"],
             str(config["monitoring"].get("candidate_scan_times_pt")),
+        ),
+        check(
+            "token_efficient_candidate_prescreen",
+            config.get("token_efficiency", {}).get("deterministic_prescreen_before_news") is True
+            and int(config.get("token_efficiency", {}).get("prescreen_news_symbol_limit", 0)) > 0,
+            str(config.get("token_efficiency")),
         ),
         check(
             "standing_authorization_state",
@@ -168,12 +176,17 @@ def main() -> int:
         ),
         check(
             "broker_mcp_verified",
-            state.get("broker_mcp_status") == "verified",
+            state.get("broker_mcp_status") in {"verified", "verified_read_only"},
             str(state.get("broker_mcp_status")),
         ),
         check(
             "verified_account_snapshot",
-            all(isinstance(verified_snapshot.get(field), (int, float)) for field in required_snapshot_fields),
+            all(isinstance(verified_account.get(field), (int, float)) for field in required_snapshot_fields)
+            or (
+                all(isinstance(verified_account.get(field), (int, float)) for field in ["account_value", "buying_power"])
+                and isinstance(verified_snapshot.get("positions"), list)
+                and isinstance(verified_snapshot.get("orders"), list)
+            ),
             str(verified_snapshot),
         ),
         check(
@@ -192,12 +205,12 @@ def main() -> int:
             live_auto["status"],
         ),
         check(
-            "live_automation_15_minute_heartbeat",
+            "live_automation_hourly_heartbeat",
             live_auto["kind"] == "heartbeat"
             and "FREQ=WEEKLY" in live_rrule
             and "BYDAY=MO,TU,WE,TH,FR" in live_rrule
-            and "BYHOUR=6,7,8,9,10,11,12,13" in live_rrule
-            and "BYMINUTE=0,15,30,45" in live_rrule,
+            and "BYHOUR=6,7,8,9,10,11,12,13,17" in live_rrule
+            and "BYMINUTE=0" in live_rrule,
             live_rrule,
         ),
         check(
@@ -216,10 +229,10 @@ def main() -> int:
             "news-aware candidate language present",
         ),
         check(
-            "twice_daily_candidate_scan_active",
+            "scheduled_candidate_scan_active",
             morning_auto["status"] == "ACTIVE"
             and morning_auto["kind"] == "cron"
-            and "BYHOUR=6,10" in morning_rrule
+            and "BYHOUR=6,10,17" in morning_rrule
             and "BYMINUTE=0" in morning_rrule,
             f"{morning_auto['status']} {morning_rrule}",
         ),

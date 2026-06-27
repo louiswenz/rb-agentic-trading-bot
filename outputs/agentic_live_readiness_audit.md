@@ -11,8 +11,8 @@ Date: 2026-06-20
 - Codex orchestrator prompt is present in `codex_live_orchestrator_prompt.md`.
 - Private live state file exists at `work/agentic_live_adapter_state.json`.
 - Main automation `daily-agentic-account-scan` is active.
-- Normal heartbeat is every 15 minutes.
-- Elevated order/risk states stay on the 15-minute heartbeat and notify only on meaningful state changes.
+- Normal heartbeat is every hour.
+- Elevated order/risk states stay on the hourly heartbeat and notify only on meaningful state changes.
 - Duplicate morning automation is paused.
 - Local readiness verifier passes.
 - Behavior tests for monitor decisions are present in `test_agentic_monitor.py`.
@@ -22,8 +22,8 @@ Date: 2026-06-20
 ## Trading Rules Confirmed
 
 - Maximum automatic new buys per day: 2.
-- Normal open-position monitoring: 900 seconds.
-- Elevated monitoring: 900 seconds.
+- Normal open-position monitoring: 3600 seconds.
+- Elevated monitoring: 3600 seconds.
 - Minimum new-buy reward/risk: 1.5R.
 - Total open-risk cap: 6% of account value.
 - Sector/group concentration cap is enabled.

@@ -138,7 +138,7 @@ def main() -> int:
         iterations += 1
         if not args.loop or iterations >= args.max_iterations:
             break
-        sleep_seconds = payload.get("next_poll_seconds") or 900
+        sleep_seconds = payload.get("next_poll_seconds") or 3600
         time.sleep(float(sleep_seconds))
     return 0
 

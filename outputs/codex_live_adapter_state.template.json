@@ -22,7 +22,7 @@
   "masked_account": "••••6332",
   "live_mode": "codex_orchestrated",
   "last_orchestrator_run": null,
-  "heartbeat_cadence_seconds": 900,
+  "heartbeat_cadence_seconds": 3600,
   "daily_buy_count": 0,
   "start_of_day_equity": null,
   "active_position": null,

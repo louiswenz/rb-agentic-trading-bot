@@ -27,9 +27,9 @@ def make_bars(symbol_strength: bool = True) -> tuple[list[swing_strategy.Bar], l
         spy_close = 100.0 + day * 0.1
         stock_close = 50.0 + day * (0.22 if symbol_strength else 0.04)
         date = f"2026-01-{(day % 28) + 1:02d}"
-        spy_bars.append(swing_strategy.Bar(date, spy_close - 0.2, spy_close + 0.3, spy_close - 0.4, spy_close))
+        spy_bars.append(swing_strategy.Bar(date, spy_close - 0.2, spy_close + 0.3, spy_close - 0.4, spy_close, 1000.0))
         stock_bars.append(
-            swing_strategy.Bar(date, stock_close - 0.3, stock_close + 0.4, stock_close - 0.5, stock_close)
+            swing_strategy.Bar(date, stock_close - 0.5, stock_close + 1.5, stock_close - 1.5, stock_close, 1000.0)
         )
 
     recent = [94.0, 96.0, 95.0, 97.0, 96.0, 100.0]
@@ -37,9 +37,10 @@ def make_bars(symbol_strength: bool = True) -> tuple[list[swing_strategy.Bar], l
         day = 204 + offset
         date = f"2026-02-{offset + 1:02d}"
         spy_close = 120.4 + offset * 0.1
-        high = close + (0.5 if offset < len(recent) - 1 else 0.2)
-        stock_bars.append(swing_strategy.Bar(date, close - 0.2, high, close - 1.0, close))
-        spy_bars.append(swing_strategy.Bar(date, spy_close - 0.2, spy_close + 0.3, spy_close - 0.4, spy_close))
+        high = close + (1.0 if offset < len(recent) - 1 else 0.5)
+        stock_volume = 1500.0 if offset == len(recent) - 1 else 1000.0
+        stock_bars.append(swing_strategy.Bar(date, close - 0.5, high, close - 2.5, close, stock_volume))
+        spy_bars.append(swing_strategy.Bar(date, spy_close - 0.2, spy_close + 0.3, spy_close - 0.4, spy_close, 1000.0))
     return stock_bars, spy_bars
 
 
@@ -96,6 +97,23 @@ class SwingStrategyNewsTests(unittest.TestCase):
         )
 
         self.assertIsNone(candidate)
+
+    def test_prescreen_defers_blocking_news_until_finalist_review(self) -> None:
+        candidate = swing_strategy.scan_symbol(
+            "AMD",
+            self.stock_bars,
+            self.spy_bars,
+            account_value=2000.0,
+            settled_cash=2000.0,
+            config=self.config,
+            news_snapshot={"AMD": {"sentiment_score": -3.0, "summary": "trading halt announced"}},
+            apply_news_filter=False,
+        )
+
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertEqual(candidate.news_score, 0.0)
+        self.assertEqual(candidate.news_summary, "news not evaluated in deterministic prescreen")
 
     def test_adverse_news_score_rejects_candidate(self) -> None:
         candidate = swing_strategy.scan_symbol(

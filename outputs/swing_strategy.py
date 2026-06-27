@@ -352,6 +352,7 @@ def scan_symbol(
     config: dict[str, Any],
     news_snapshot: dict[str, Any] | None = None,
     max_trade_risk_dollars: float | None = None,
+    apply_news_filter: bool = True,
 ) -> Candidate | None:
     strategy = config["strategy"]
     risk = config["risk"]
@@ -412,9 +413,13 @@ def scan_symbol(
     if stop_distance_pct < float(risk["min_stop_pct"]) or stop_distance_pct > float(risk["max_stop_pct"]):
         return None
 
-    news_ok, news_score, news_summary = normalize_news_item(symbol, news_snapshot or {}, config, latest.date)
-    if not news_ok:
-        return None
+    if apply_news_filter:
+        news_ok, news_score, news_summary = normalize_news_item(symbol, news_snapshot or {}, config, latest.date)
+        if not news_ok:
+            return None
+    else:
+        news_score = 0.0
+        news_summary = "news not evaluated in deterministic prescreen"
 
     max_entry = max_next_session_entry(latest.close, adaptive_gap_pct(relative_strength, news_score, config))
     shares, position_value, max_loss = position_size(
@@ -684,6 +689,14 @@ def main() -> int:
         help="Optional latest-news snapshot path or JSON object keyed by symbol. "
         "Each item may include sentiment_score -3..3, summary, headlines, material_events, and blocking_event.",
     )
+    parser.add_argument(
+        "--prescreen-news-symbols-only",
+        action="store_true",
+        help=(
+            "Run deterministic technical/risk filters without applying news and emit only a ranked symbol shortlist "
+            "for downstream news collection."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     args = parser.parse_args()
 
@@ -712,6 +725,9 @@ def main() -> int:
             f"News filter active: latest symbol news is scored over the last "
             f"{strategy['news_filter']['lookback_hours']} hours when a news snapshot is supplied."
         )
+    if args.prescreen_news_symbols_only:
+        output["order_mode"] = "deterministic_prescreen_news_symbols_only"
+        output["messages"].append("Token-efficient prescreen active: news is deferred until after technical/risk filters.")
 
     if drawdown_paused(args.account_value, args.monthly_start_equity, float(risk["drawdown_pause_pct"])):
         output["status"] = "paused"
@@ -782,11 +798,25 @@ def main() -> int:
             config,
             news_snapshot,
             remaining_open_risk,
+            apply_news_filter=not args.prescreen_news_symbols_only,
         )
         if candidate:
             candidates.append(candidate)
 
     candidates.sort(key=lambda item: item.combined_rank_score, reverse=True)
+    if args.prescreen_news_symbols_only:
+        limit = int(config.get("token_efficiency", {}).get("prescreen_news_symbol_limit", 6))
+        output["status"] = "prescreen_ready"
+        output["news_collection_symbols"] = [candidate.symbol for candidate in candidates[:limit]]
+        if output["news_collection_symbols"]:
+            output["messages"].append(
+                "Collect latest news only for prescreen survivors: "
+                + ", ".join(output["news_collection_symbols"])
+            )
+        else:
+            output["messages"].append("No symbols survived deterministic prescreen; news collection skipped.")
+        return emit(output, args.json)
+
     if live_prices:
         revalidated: list[Candidate] = []
         for candidate in candidates:

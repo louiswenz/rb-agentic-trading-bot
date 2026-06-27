@@ -20,6 +20,14 @@
     "missing_or_stale_history_policy": "symbol_ineligible_after_refresh",
     "use_broker_quotes_for_live_entry_validation": true
   },
+  "token_efficiency": {
+    "enabled": true,
+    "deterministic_prescreen_before_news": true,
+    "prescreen_news_symbol_limit": 6,
+    "news_cache_ttl_hours": 48,
+    "live_quote_scope": "active_positions_pending_candidates_market_context",
+    "compact_heartbeat_messages": true
+  },
   "strategy": {
     "name": "Robinhood Agentic Swing Trading",
     "style": "concentrated_aggressive_swing",
@@ -282,9 +290,9 @@
     "after_close_candidate_scan_time_pt": "17:00",
     "candidate_scan_times_pt": ["06:00", "10:00", "17:00"],
     "no_position_no_candidate_brief_time_pt": "13:30",
-    "pending_candidate_validation_time_pt": "06:45",
-    "open_position_poll_seconds": 900,
-    "elevated_poll_seconds": 900,
+    "pending_candidate_validation_time_pt": "07:00",
+    "open_position_poll_seconds": 3600,
+    "elevated_poll_seconds": 3600,
     "near_stop_or_target_pct": 1.0,
     "elevated_after_entry_minutes": 30,
     "daily_brief_time_pt": "13:30",
