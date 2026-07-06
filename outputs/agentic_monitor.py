@@ -12,9 +12,11 @@ import argparse
 import json
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import agentic_task_queue
 
 
 DEFAULT_STATE: dict[str, Any] = {
@@ -26,6 +28,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_account_snapshot": None,
     "position": None,
     "positions": [],
+    "option_positions": [],
     "pending_candidates": [],
     "open_orders": [],
     "last_events": [],
@@ -109,11 +112,18 @@ def reconcile_account(
     state["open_orders"] = [order for order in orders if order.get("state") in {"open", "queued", "confirmed"}]
 
     positions = account.get("positions", [])
+    option_positions = account.get("option_positions", [])
     state["account_positions"] = positions
+    state["account_option_positions"] = option_positions
     sync_tracked_positions(state, positions)
+    sync_tracked_option_positions(state, option_positions)
 
     if prior and prior.get("positions") != account.get("positions"):
         events.append(event("account_position_change", "Position state changed.", positions=account.get("positions", [])))
+    if prior and prior.get("option_positions") != account.get("option_positions"):
+        events.append(
+            event("option_position_change", "Option position state changed.", option_positions=account.get("option_positions", []))
+        )
     if prior and prior.get("buying_power") != account.get("buying_power"):
         events.append(event("buying_power_change", "Buying power changed.", buying_power=account.get("buying_power")))
     return events
@@ -149,6 +159,35 @@ def tracked_positions(state: dict[str, Any]) -> list[dict[str, Any]]:
         return [position for position in positions if position]
     position = state.get("position")
     return [position] if position else []
+
+
+def sync_tracked_option_positions(state: dict[str, Any], account_positions: list[dict[str, Any]]) -> None:
+    by_id = {position.get("option_id"): position for position in account_positions if position.get("option_id")}
+    tracked = tracked_option_positions(state)
+    synced: list[dict[str, Any]] = []
+
+    for position in tracked:
+        option_id = position.get("option_id")
+        account_position = by_id.get(option_id)
+        if not account_position:
+            continue
+        merged = deepcopy(position)
+        merged.update({key: value for key, value in account_position.items() if value is not None})
+        synced.append(merged)
+
+    tracked_ids = {position.get("option_id") for position in synced}
+    for option_id, account_position in by_id.items():
+        if option_id not in tracked_ids:
+            synced.append(account_position)
+
+    state["option_positions"] = synced
+
+
+def tracked_option_positions(state: dict[str, Any]) -> list[dict[str, Any]]:
+    positions = state.get("option_positions")
+    if isinstance(positions, list):
+        return [position for position in positions if position and float(position.get("quantity", 0) or 0) > 0]
+    return []
 
 
 def detect_manual_activity(state: dict[str, Any], account: dict[str, Any], orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -254,6 +293,66 @@ def max_positions_per_group(account: dict[str, Any], config: dict[str, Any]) -> 
     if equity < float(risk["funding_minimum_standard_usd"]):
         return int(concentration.get("max_positions_per_group_under_5000", 1))
     return int(concentration.get("max_positions_per_group_standard", 1))
+
+
+def allow_add_to_existing_positions(config: dict[str, Any]) -> bool:
+    return bool(config["strategy"].get("allow_add_to_existing_positions", False))
+
+
+def option_trading_enabled(config: dict[str, Any]) -> bool:
+    return bool(config.get("execution", {}).get("allow_options", False)) and bool(
+        config.get("options_strategy", {}).get("enabled", False)
+    )
+
+
+def account_option_approved(account: dict[str, Any], config: dict[str, Any]) -> bool:
+    required = set(config.get("options_strategy", {}).get("require_account_option_level", []))
+    return str(account.get("option_level", "")) in required
+
+
+def is_option_candidate(candidate: dict[str, Any]) -> bool:
+    return str(candidate.get("asset_type", "")).lower() == "option"
+
+
+def option_quote_price(quote: dict[str, Any]) -> float | None:
+    for key in ("price", "mark_price", "last_trade_price", "last_price", "ask_price", "bid_price"):
+        value = quote.get(key)
+        if value not in (None, ""):
+            return float(value)
+    bid = quote.get("bid")
+    ask = quote.get("ask")
+    if bid not in (None, "") and ask not in (None, ""):
+        return (float(bid) + float(ask)) / 2.0
+    return None
+
+
+def option_entry_price(position: dict[str, Any]) -> float:
+    for key in ("entry_price", "average_price", "average_buy_price", "avg_price"):
+        value = position.get(key)
+        if value not in (None, ""):
+            return float(value)
+    return 0.0
+
+
+def option_dte(position: dict[str, Any], trading_date: str | None = None) -> int | None:
+    expiration = position.get("expiration_date")
+    if not expiration:
+        return None
+    today = date.fromisoformat(trading_date) if trading_date else datetime.now(timezone.utc).date()
+    return (date.fromisoformat(str(expiration)) - today).days
+
+
+def option_close_order_for_position(state: dict[str, Any], option_id: str) -> dict[str, Any] | None:
+    for order in state.get("open_orders", []):
+        if (
+            order.get("asset_type") == "option"
+            and order.get("option_id") == option_id
+            and order.get("side") == "sell"
+            and order.get("position_effect") == "close"
+            and order.get("state") in {"open", "queued", "confirmed"}
+        ):
+            return order
+    return None
 
 
 def position_risk_dollars(position: dict[str, Any]) -> float:
@@ -414,19 +513,22 @@ def monitor_pending_candidates(
 
     if state.get("status") == "paused":
         return events, actions
-    if current_open_position_count(state, account) >= max_open_positions(account, config):
-        events.append(event("max_positions_reached", "Candidate buying skipped because max open positions is reached."))
-        return events, actions
     if int(state.get("daily_buy_count", 0)) >= int(config["execution"]["max_auto_buys_per_day"]):
         return events, actions
 
     held_symbols = open_position_symbols(state, account)
+    add_to_existing_allowed = allow_add_to_existing_positions(config)
+    max_positions_reached = current_open_position_count(state, account) >= max_open_positions(account, config)
     group_counts = open_group_counts(state, account, config)
     max_group_count = max_positions_per_group(account, config)
     remaining_risk = remaining_open_risk_dollars(state, account, config)
     for candidate in state.get("pending_candidates", []):
         symbol = candidate["symbol"]
-        if symbol in held_symbols:
+        is_held_symbol = symbol in held_symbols
+        if max_positions_reached and not (add_to_existing_allowed and is_held_symbol):
+            events.append(event("max_positions_reached", "Candidate buying skipped because max open positions is reached.", symbol=symbol))
+            continue
+        if is_held_symbol and not add_to_existing_allowed:
             events.append(event("candidate_already_held", "Candidate skipped because symbol is already held.", symbol=symbol))
             continue
         group = str(candidate.get("sector_group") or symbol_group(symbol, config))
@@ -450,6 +552,33 @@ def monitor_pending_candidates(
         if live_price > float(candidate["max_next_session_entry"]):
             events.append(event("candidate_gap_skip", "Candidate skipped above max entry.", symbol=symbol, live_price=live_price))
             continue
+        if is_option_candidate(candidate):
+            if not option_trading_enabled(config):
+                events.append(event("option_trading_disabled", "Option candidate skipped because option trading is disabled.", symbol=symbol))
+                continue
+            if not account_option_approved(account, config):
+                events.append(
+                    event(
+                        "option_trading_not_approved",
+                        "Option candidate skipped because the Agentic account lacks required option approval.",
+                        symbol=symbol,
+                        option_level=account.get("option_level", ""),
+                    )
+                )
+                continue
+            if not candidate.get("option_id") or not candidate.get("option_limit_price"):
+                events.append(
+                    event(
+                        "option_contract_missing",
+                        "Option candidate skipped because no resolved option contract was supplied.",
+                        symbol=symbol,
+                    )
+                )
+                continue
+            action = review_and_place_option_buy_to_open(state, account, candidate, live_price, config)
+            actions.append(action)
+            events.append(event("auto_option_buy_planned", "Automatic option buy action prepared.", symbol=symbol, live_price=live_price))
+            break
         action = review_and_place_auto_buy(state, account, candidate, live_price, config)
         actions.append(action)
         events.append(event("auto_buy_planned", "Automatic buy action prepared.", symbol=symbol, live_price=live_price))
@@ -484,6 +613,229 @@ def review_and_place_auto_buy(
             "partial_target": candidate.get("partial_target"),
         },
     }
+
+
+def review_and_place_option_buy_to_open(
+    state: dict[str, Any],
+    account: dict[str, Any],
+    candidate: dict[str, Any],
+    live_price: float,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    options = config["options_strategy"]
+    option_id = str(candidate.get("option_id", ""))
+    if not option_id:
+        raise ValueError("Option candidate missing option_id")
+    quantity = int(candidate.get("contracts", candidate.get("quantity", 1)))
+    limit_price = float(candidate["option_limit_price"])
+    estimated_premium = quantity * limit_price * 100.0
+    return {
+        "type": "review_and_place_option_buy_to_open",
+        "asset_type": "option",
+        "symbol": candidate["symbol"],
+        "chain_symbol": candidate.get("chain_symbol", candidate["symbol"]),
+        "underlying_type": candidate.get("underlying_type", "equity"),
+        "option_id": option_id,
+        "option_type": candidate.get("option_type", "call"),
+        "strategy": candidate.get("option_strategy", "long_call"),
+        "quantity": str(quantity),
+        "legs": [
+            {
+                "option_id": option_id,
+                "side": "buy",
+                "position_effect": "open",
+                "ratio_quantity": 1,
+            }
+        ],
+        "order_type": options.get("order_type", "limit"),
+        "price": f"{limit_price:.2f}",
+        "time_in_force": options.get("time_in_force", "gfd"),
+        "market_hours": options.get("market_hours", "regular_hours"),
+        "estimated_cost": round(estimated_premium, 2),
+        "estimated_max_loss": round(float(candidate.get("max_loss", estimated_premium)), 2),
+        "underlying_live_price": live_price,
+        "requires_broker_review": bool(config["execution"]["require_broker_review_before_order"]),
+        "approval_gate": {
+            "agentic_allowed": bool(account.get("agentic_allowed", True)),
+            "option_level": account.get("option_level", ""),
+            "required_option_levels": options.get("require_account_option_level", []),
+        },
+        "exit_plan": {
+            "sell_to_close": True,
+            "synthetic_monitoring": True,
+            "no_broker_protective_stop": True,
+        },
+    }
+
+
+def review_and_place_option_sell_to_close(
+    position: dict[str, Any],
+    limit_price: float,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    options = config["options_strategy"]
+    option_id = str(position["option_id"])
+    quantity = int(position.get("quantity", position.get("contracts", 1)))
+    return {
+        "type": "review_and_place_option_sell_to_close",
+        "asset_type": "option",
+        "symbol": position["symbol"],
+        "chain_symbol": position.get("chain_symbol", position["symbol"]),
+        "underlying_type": position.get("underlying_type", "equity"),
+        "option_id": option_id,
+        "option_type": position.get("option_type", "call"),
+        "quantity": str(quantity),
+        "legs": [
+            {
+                "option_id": option_id,
+                "side": "sell",
+                "position_effect": "close",
+                "ratio_quantity": 1,
+            }
+        ],
+        "order_type": options.get("order_type", "limit"),
+        "price": f"{float(limit_price):.2f}",
+        "time_in_force": options.get("time_in_force", "gfd"),
+        "market_hours": options.get("market_hours", "regular_hours"),
+        "requires_broker_review": bool(config["execution"]["require_broker_review_before_order"]),
+    }
+
+
+def cancel_option_order_action(order_id: str, symbol: str | None = None) -> dict[str, Any]:
+    return {
+        "type": "cancel_option_order",
+        "asset_type": "option",
+        "order_id": order_id,
+        "symbol": symbol,
+    }
+
+
+def option_exit_reason(
+    position: dict[str, Any],
+    option_price: float,
+    underlying_quote: dict[str, Any] | None,
+    config: dict[str, Any],
+    trading_date: str | None = None,
+) -> tuple[str | None, dict[str, Any]]:
+    options_exit = config.get("options_exit", {})
+    entry = option_entry_price(position)
+    if entry <= 0:
+        return "missing_entry_price", {"option_price": option_price}
+
+    gain_pct = ((option_price - entry) / entry) * 100.0
+    if gain_pct >= float(options_exit.get("profit_target_pct", 50.0)):
+        return "profit_target", {"gain_pct": round(gain_pct, 2), "entry_price": entry, "option_price": option_price}
+
+    loss_pct = ((entry - option_price) / entry) * 100.0
+    if loss_pct >= float(options_exit.get("stop_loss_pct", 35.0)):
+        return "stop_loss", {"loss_pct": round(loss_pct, 2), "entry_price": entry, "option_price": option_price}
+
+    dte = option_dte(position, trading_date)
+    if dte is not None and dte <= int(options_exit.get("min_dte_exit", 14)):
+        return "time_stop", {"dte": dte}
+
+    if bool(options_exit.get("use_underlying_stop", True)) and underlying_quote:
+        underlying_stop = position.get("underlying_stop_price")
+        if underlying_stop not in (None, "") and float(underlying_quote["price"]) <= float(underlying_stop):
+            return (
+                "underlying_stop",
+                {"underlying_price": float(underlying_quote["price"]), "underlying_stop_price": float(underlying_stop)},
+            )
+
+    return None, {"gain_pct": round(gain_pct, 2)}
+
+
+def monitor_option_positions(
+    state: dict[str, Any],
+    account: dict[str, Any],
+    quotes: dict[str, Any],
+    config: dict[str, Any],
+    trading_date: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    events: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = []
+    if not option_trading_enabled(config) or not config.get("options_exit", {}).get("enabled", False):
+        return events, actions
+
+    if not account_option_approved(account, config):
+        if tracked_option_positions(state):
+            events.append(
+                event(
+                    "option_exit_not_approved",
+                    "Option exits blocked because the Agentic account lacks required option approval.",
+                    option_level=account.get("option_level", ""),
+                )
+            )
+        return events, actions
+
+    for position in tracked_option_positions(state):
+        option_id = str(position.get("option_id", ""))
+        if not option_id:
+            events.append(event("option_position_missing_id", "Option position skipped because option_id is missing."))
+            continue
+        if config.get("options_exit", {}).get("avoid_duplicate_close_orders", True) and option_close_order_for_position(
+            state, option_id
+        ):
+            events.append(
+                event("option_close_order_exists", "Option exit skipped because a close order is already open.", option_id=option_id)
+            )
+            continue
+        quote = quotes.get(option_id)
+        if not quote:
+            events.append(
+                event(
+                    "option_quote_missing",
+                    "Option exit skipped because no live option quote was available.",
+                    symbol=position.get("symbol"),
+                    option_id=option_id,
+                )
+            )
+            continue
+        option_price = option_quote_price(quote)
+        if option_price is None:
+            events.append(
+                event(
+                    "option_quote_invalid",
+                    "Option exit skipped because live option quote had no usable price.",
+                    symbol=position.get("symbol"),
+                    option_id=option_id,
+                )
+            )
+            continue
+        underlying_symbol = str(position.get("symbol") or position.get("chain_symbol") or "")
+        reason, details = option_exit_reason(
+            position,
+            option_price,
+            quotes.get(underlying_symbol),
+            config,
+            trading_date,
+        )
+        if not reason:
+            continue
+        if reason == "missing_entry_price":
+            events.append(
+                event(
+                    "option_entry_missing",
+                    "Option exit skipped because entry price is missing.",
+                    symbol=position.get("symbol"),
+                    option_id=option_id,
+                )
+            )
+            continue
+        action = review_and_place_option_sell_to_close(position, option_price, config)
+        action["exit_reason"] = reason
+        actions.append(action)
+        events.append(
+            event(
+                "option_exit_planned",
+                "Automatic option sell-to-close action prepared.",
+                symbol=position.get("symbol"),
+                option_id=option_id,
+                reason=reason,
+                **details,
+            )
+        )
+    return events, actions
 
 
 def handle_buy_fill(
@@ -529,11 +881,15 @@ def handle_buy_fill(
 
 
 def place_protective_stop(symbol: str, quantity: int, stop_price: float, config: dict[str, Any]) -> dict[str, Any]:
+    consolidate = bool(config["execution"].get("consolidate_protective_stops_by_symbol", True))
     return {
         "type": "place_protective_stop",
         "symbol": symbol,
         "side": "sell",
         "quantity": quantity,
+        "quantity_scope": "full_position" if consolidate else "fill_quantity",
+        "consolidate_by_symbol": consolidate,
+        "cancel_existing_symbol_stops_first": consolidate,
         "order_type": config["execution"]["protective_stop_order_type"],
         "stop_price": round(stop_price, 2),
         "time_in_force": config["execution"]["protective_stop_time_in_force"],
@@ -597,11 +953,16 @@ def handle_exit_fill(state: dict[str, Any], fill: dict[str, Any]) -> list[dict[s
 
 def monitor_active_position(
     state: dict[str, Any],
+    account: dict[str, Any],
     quotes: dict[str, Any],
     config: dict[str, Any],
+    trading_date: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     events = detect_price_events(state, quotes, config)
     actions: list[dict[str, Any]] = []
+    option_events, option_actions = monitor_option_positions(state, account, quotes, config, trading_date)
+    events.extend(option_events)
+    actions.extend(option_actions)
     target_symbols = {item["details"]["symbol"] for item in events if item["kind"] == "target_reached"}
     ratchet_events, ratchet_actions = ratchet_protective_stops(state, quotes, config, target_symbols)
     events.extend(ratchet_events)
@@ -707,6 +1068,11 @@ def run_monitor(
     for position in tracked_positions(state):
         if position.get("symbol"):
             watched_symbols.append(position["symbol"])
+    for position in tracked_option_positions(state):
+        if position.get("option_id"):
+            watched_symbols.append(position["option_id"])
+        if position.get("symbol"):
+            watched_symbols.append(position["symbol"])
     watched_symbols.extend(candidate["symbol"] for candidate in candidates)
     watched_symbols.extend([config["strategy"]["benchmark_symbol"], "VIX"])
     live_quotes = fetch_live_quotes(sorted(set(watched_symbols)), quotes)
@@ -716,14 +1082,35 @@ def run_monitor(
         events.extend(new_events)
         actions.extend(new_actions)
     elif mode == "position":
-        new_events, new_actions = monitor_active_position(state, live_quotes, config)
+        new_events, new_actions = monitor_active_position(state, account, live_quotes, config, trading_date)
         events.extend(new_events)
         actions.extend(new_actions)
     elif mode == "daily":
         brief, refinement_events = daily_reflection(state, account, live_quotes, config)
         events.extend(refinement_events)
+        _, task_events = agentic_task_queue.reconcile_tasks(state, account, live_quotes, config, trading_date)
+        for task_event in task_events:
+            events.append(
+                event(
+                    task_event["kind"],
+                    "Agentic task queue flagged unresolved broker monitoring risk.",
+                    symbol=task_event.get("symbol"),
+                    reason=task_event.get("reason"),
+                )
+            )
         state["last_events"] = events[-50:]
         return MonitorResult(state, events, actions, next_poll_interval(state, events, config), brief)
+
+    _, task_events = agentic_task_queue.reconcile_tasks(state, account, live_quotes, config, trading_date)
+    for task_event in task_events:
+        events.append(
+            event(
+                task_event["kind"],
+                "Agentic task queue flagged unresolved broker monitoring risk.",
+                symbol=task_event.get("symbol"),
+                reason=task_event.get("reason"),
+            )
+        )
 
     state["last_events"] = events[-50:]
     return MonitorResult(state, events, actions, next_poll_interval(state, events, config))
@@ -739,6 +1126,8 @@ def main() -> int:
     parser.add_argument("--candidates-json", default="[]", help="Candidate list JSON or path.")
     parser.add_argument("--mode", choices=["pending", "position", "daily"], default="daily")
     parser.add_argument("--trading-date", default=datetime.now().date().isoformat())
+    parser.add_argument("--tasks-json", default="work/agentic_tasks.json")
+    parser.add_argument("--tasks-md", default="work/agentic_tasks.md")
     parser.add_argument("--no-save", action="store_true")
     args = parser.parse_args()
 
@@ -757,6 +1146,7 @@ def main() -> int:
     result = run_monitor(state, config, account, orders, quotes, candidates, args.mode, args.trading_date)
     if not args.no_save:
         save_state(state_path, result.state)
+        agentic_task_queue.save_task_files(Path(args.tasks_json), Path(args.tasks_md), result.state.get("agentic_tasks", []))
 
     print(
         json.dumps(

@@ -7,6 +7,8 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import json
+from copy import deepcopy
 from datetime import date, timedelta
 
 
@@ -14,6 +16,12 @@ OUTPUTS = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(OUTPUTS))
 
 import swing_strategy as scanner  # noqa: E402
+from test_swing_strategy_news import make_bars  # noqa: E402
+
+
+def load_config() -> dict:
+    with (OUTPUTS / "strategy_config.json").open("r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
 def bars(count: int = 60, start: float = 100.0, volume: float = 1000.0) -> list[scanner.Bar]:
@@ -31,6 +39,9 @@ def bars(count: int = 60, start: float = 100.0, volume: float = 1000.0) -> list[
 
 
 class SwingStrategySignalTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = load_config()
+
     def test_volume_ratio_uses_prior_average(self) -> None:
         items = bars(count=22, volume=1000)
         items[-1] = scanner.Bar("2026-02-01", 121, 123, 120, 122, 1500)
@@ -107,6 +118,145 @@ class SwingStrategySignalTests(unittest.TestCase):
 
             self.assertTrue(scanner.validate_fresh_price_history(output, prices, config))
             self.assertTrue(any("ABC: only 2 bars" in message for message in output["messages"]))
+
+    def test_pullback_in_uptrend_can_create_candidate_without_breakout(self) -> None:
+        config = deepcopy(self.config)
+        config["strategy"]["pullback_in_uptrend"]["max_distance_above_ema_pct"] = 15.0
+        config["strategy"]["pullback_in_uptrend"]["rsi_max"] = 80.0
+        config["risk"]["min_stop_pct"] = 3.0
+        stock_bars: list[scanner.Bar] = []
+        spy_bars: list[scanner.Bar] = []
+        for index in range(204):
+            day = (date(2026, 1, 1) + timedelta(days=index)).isoformat()
+            close = 80.0 + index * 0.1
+            stock_bars.append(scanner.Bar(day, close - 0.2, close + 0.3, close - 0.3, close, 1000.0))
+            spy_close = 100.0 + index * 0.05
+            spy_bars.append(scanner.Bar(day, spy_close - 0.2, spy_close + 0.2, spy_close - 0.2, spy_close, 1000.0))
+        recent = [101.0, 103.0, 105.0, 103.0, 101.0, 99.0, 100.0, 101.0]
+        for offset, close in enumerate(recent):
+            day = date(2026, 8, 1) + timedelta(days=offset)
+            high = close + 1.0
+            if offset == len(recent) - 2:
+                high = close + 2.5
+            if offset == len(recent) - 1:
+                high = close + 0.2
+            stock_bars.append(scanner.Bar(day.isoformat(), close - 0.5, high, close - 1.0, close, 900.0))
+            spy_close = 110.0 + offset * 0.1
+            spy_bars.append(scanner.Bar(day.isoformat(), spy_close - 0.2, spy_close + 0.2, spy_close - 0.2, spy_close, 1000.0))
+
+        candidate = scanner.scan_symbol(
+            "AMD",
+            stock_bars,
+            spy_bars,
+            account_value=5000.0,
+            settled_cash=5000.0,
+            config=config,
+            news_snapshot={},
+        )
+
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertEqual(candidate.setup_type, "pullback_in_uptrend")
+        self.assertIn("pullback-in-uptrend", candidate.reason)
+
+    def test_sector_relative_momentum_contributes_to_rank(self) -> None:
+        config = deepcopy(self.config)
+        stock_bars, spy_bars = make_bars()
+        sector_bars = deepcopy(spy_bars)
+        for index in range(len(sector_bars)):
+            close = 80.0 + index * 0.2
+            sector_bars[index] = scanner.Bar(sector_bars[index].date, close - 0.1, close + 0.2, close - 0.2, close, 1000.0)
+
+        candidate = scanner.scan_symbol(
+            "AMD",
+            stock_bars,
+            spy_bars,
+            account_value=5000.0,
+            settled_cash=5000.0,
+            config=config,
+            news_snapshot={},
+            sector_bars_by_symbol={"SMH": sector_bars},
+        )
+
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertIsNotNone(candidate.sector_relative_strength_pct)
+        self.assertGreater(candidate.combined_rank_score, candidate.relative_strength_pct)
+
+    def test_quality_range_reversion_can_pass_without_positive_relative_strength(self) -> None:
+        config = deepcopy(self.config)
+        config["risk"]["min_stop_pct"] = 1.0
+        config["risk"]["max_stop_pct"] = 12.0
+        stock_bars: list[scanner.Bar] = []
+        spy_bars: list[scanner.Bar] = []
+        for index in range(205):
+            day = (date(2026, 1, 1) + timedelta(days=index)).isoformat()
+            close = 95.0 + index * 0.12
+            stock_bars.append(scanner.Bar(day, close - 0.4, close + 0.5, close - 0.5, close, 1000.0))
+            spy_close = 100.0 + index * 0.25
+            spy_bars.append(scanner.Bar(day, spy_close - 0.2, spy_close + 0.3, spy_close - 0.3, spy_close, 1000.0))
+        recent = [121.0, 119.0, 116.0, 113.0, 115.0]
+        for offset, close in enumerate(recent):
+            day = date(2026, 8, 1) + timedelta(days=offset)
+            open_price = close - 1.0 if offset == len(recent) - 1 else close + 0.5
+            stock_bars.append(scanner.Bar(day.isoformat(), open_price, close + 0.8, close - 1.2, close, 800.0))
+            spy_close = 151.5 + offset * 0.3
+            spy_bars.append(scanner.Bar(day.isoformat(), spy_close - 0.2, spy_close + 0.3, spy_close - 0.3, spy_close, 1000.0))
+
+        candidate = scanner.scan_symbol(
+            "AMD",
+            stock_bars,
+            spy_bars,
+            account_value=7000.0,
+            settled_cash=3000.0,
+            config=config,
+            news_snapshot={},
+        )
+
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertLess(candidate.relative_strength_pct, 0)
+        self.assertEqual(candidate.setup_type, "quality_range_reversion")
+
+    def test_sector_relative_pullback_can_pass_while_stock_lags_sector(self) -> None:
+        config = deepcopy(self.config)
+        config["risk"]["min_stop_pct"] = 1.0
+        config["risk"]["max_stop_pct"] = 12.0
+        stock_bars: list[scanner.Bar] = []
+        spy_bars: list[scanner.Bar] = []
+        sector_bars: list[scanner.Bar] = []
+        for index in range(205):
+            day = (date(2026, 1, 1) + timedelta(days=index)).isoformat()
+            stock_close = 90.0 + index * 0.08
+            sector_close = 80.0 + index * 0.16
+            spy_close = 100.0 + index * 0.09
+            stock_bars.append(scanner.Bar(day, stock_close - 0.3, stock_close + 0.4, stock_close - 0.4, stock_close, 1000.0))
+            sector_bars.append(scanner.Bar(day, sector_close - 0.2, sector_close + 0.3, sector_close - 0.3, sector_close, 1000.0))
+            spy_bars.append(scanner.Bar(day, spy_close - 0.2, spy_close + 0.3, spy_close - 0.3, spy_close, 1000.0))
+        recent = [108.0, 106.0, 104.0, 102.0, 103.5]
+        for offset, close in enumerate(recent):
+            day = date(2026, 8, 1) + timedelta(days=offset)
+            stock_bars.append(scanner.Bar(day.isoformat(), close - 0.8, close + 0.5, close - 1.0, close, 800.0))
+            sector_close = 113.0 + offset * 0.4
+            sector_bars.append(scanner.Bar(day.isoformat(), sector_close - 0.2, sector_close + 0.3, sector_close - 0.3, sector_close, 1000.0))
+            spy_close = 119.0 + offset * 0.05
+            spy_bars.append(scanner.Bar(day.isoformat(), spy_close - 0.2, spy_close + 0.3, spy_close - 0.3, spy_close, 1000.0))
+
+        candidate = scanner.scan_symbol(
+            "AMD",
+            stock_bars,
+            spy_bars,
+            account_value=7000.0,
+            settled_cash=3000.0,
+            config=config,
+            news_snapshot={},
+            sector_bars_by_symbol={"SMH": sector_bars},
+        )
+
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertEqual(candidate.setup_type, "sector_relative_pullback")
+        self.assertLess(candidate.sector_relative_strength_pct or 0, 0)
 
 
 if __name__ == "__main__":

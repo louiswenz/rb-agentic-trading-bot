@@ -9,7 +9,9 @@
     "max_position_pct": 50.0,
     "max_planned_risk_pct": 4.0,
     "daily_loss_stop_pct": 5.0,
-    "one_open_position_under_5000": true
+    "one_open_position_under_5000": false,
+    "allow_long_options": true,
+    "auto_option_exits": true
   },
   "account_selector": {
     "nickname": "Agentic",
@@ -20,6 +22,8 @@
   },
   "agentic_account_number": "",
   "masked_account": "••••6332",
+  "agentic_option_level": "",
+  "option_trading_blocked_reason": null,
   "live_mode": "codex_orchestrated",
   "last_orchestrator_run": null,
   "heartbeat_cadence_seconds": 3600,
@@ -29,6 +33,9 @@
   "protective_stop_order_id": null,
   "profit_order_id": null,
   "last_equity_order_ids": [],
+  "last_option_order_ids": [],
+  "option_positions": [],
+  "last_option_exit_order_ids": [],
   "last_ref_ids": [],
   "pending_candidates": [],
   "manual_activity_detected": false,

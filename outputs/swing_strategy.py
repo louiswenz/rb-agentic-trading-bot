@@ -44,6 +44,7 @@ class Bar:
 class Candidate:
     symbol: str
     date: str
+    setup_type: str
     entry: float
     max_entry: float
     stop: float
@@ -56,6 +57,8 @@ class Candidate:
     reward_risk_ratio: float
     sector_group: str
     relative_strength_pct: float
+    sector_relative_strength_pct: float | None
+    sector_momentum_pct: float | None
     volume_ratio: float | None
     atr: float | None
     stop_method: str
@@ -64,6 +67,16 @@ class Candidate:
     news_summary: str
     reason: str
     exit_plan: str
+
+
+@dataclass(frozen=True)
+class SetupSignal:
+    setup_type: str
+    score: float
+    reason: str
+    partial_target_r_multiple: float
+    target_r_multiple: float
+    max_gap_pct: float | None = None
 
 
 ETF_SYMBOLS = {"SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "XLV"}
@@ -109,6 +122,33 @@ def average(values: list[float], days: int) -> float | None:
     if len(values) < days:
         return None
     return sum(values[-days:]) / days
+
+
+def ema(values: list[float], days: int) -> float | None:
+    if len(values) < days:
+        return None
+    multiplier = 2.0 / (days + 1)
+    value = sum(values[:days]) / days
+    for item in values[days:]:
+        value = (item * multiplier) + (value * (1.0 - multiplier))
+    return value
+
+
+def rsi(values: list[float], days: int = 14) -> float | None:
+    if len(values) < days + 1:
+        return None
+    gains: list[float] = []
+    losses: list[float] = []
+    for index in range(-days, 0):
+        change = values[index] - values[index - 1]
+        gains.append(max(change, 0.0))
+        losses.append(max(-change, 0.0))
+    avg_gain = sum(gains) / days
+    avg_loss = sum(losses) / days
+    if avg_loss == 0:
+        return 100.0
+    relative_strength = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + relative_strength))
 
 
 def true_ranges(bars: list[Bar]) -> list[float]:
@@ -163,6 +203,351 @@ def has_pullback_or_consolidation(bars: list[Bar], lookback: int) -> bool:
     had_pullback = any(closes[i] < closes[i - 1] for i in range(1, len(closes)))
     had_consolidation = range_pct <= 4.0
     return had_pullback or had_consolidation
+
+
+def relaxed_entry_config(config: dict[str, Any]) -> dict[str, Any]:
+    return config["strategy"].get("relaxed_entry", {})
+
+
+def relaxed_entry_enabled(config: dict[str, Any]) -> bool:
+    return bool(relaxed_entry_config(config).get("enabled", False))
+
+
+def minimum_relative_strength(config: dict[str, Any]) -> float:
+    relaxed = relaxed_entry_config(config)
+    if relaxed_entry_enabled(config) and "min_relative_strength_pct" in relaxed:
+        return float(relaxed["min_relative_strength_pct"])
+    return 0.0
+
+
+def prior_high_breakout_ok(latest: Bar, prior: Bar, config: dict[str, Any]) -> bool:
+    if latest.close > prior.high:
+        return True
+    relaxed = relaxed_entry_config(config)
+    if not relaxed_entry_enabled(config):
+        return False
+    tolerance_pct = float(relaxed.get("prior_high_tolerance_pct", 0.0))
+    if tolerance_pct <= 0:
+        return False
+    return latest.close >= prior.high * (1.0 - tolerance_pct / 100.0)
+
+
+def momentum_continuation_ok(
+    latest: Bar,
+    prior: Bar,
+    sma50: float,
+    sma200: float,
+    relative_strength: float,
+    latest_volume_ratio: float | None,
+    config: dict[str, Any],
+) -> bool:
+    relaxed = relaxed_entry_config(config)
+    if not relaxed_entry_enabled(config) or not bool(relaxed.get("allow_momentum_continuation", False)):
+        return False
+    min_rs = float(relaxed.get("momentum_min_relative_strength_pct", max(0.0, minimum_relative_strength(config))))
+    min_volume = float(relaxed.get("momentum_min_volume_ratio", relaxed.get("volume_min_ratio", 0.0)))
+    if latest.close <= prior.close:
+        return False
+    if latest.close <= sma50 or latest.close <= sma200:
+        return False
+    if relative_strength < min_rs:
+        return False
+    if latest_volume_ratio is not None and latest_volume_ratio < min_volume:
+        return False
+    return True
+
+
+def pullback_in_uptrend_ok(
+    bars: list[Bar],
+    latest: Bar,
+    prior: Bar,
+    closes: list[float],
+    sma50: float,
+    sma200: float,
+    relative_strength: float,
+    latest_volume_ratio: float | None,
+    config: dict[str, Any],
+) -> bool:
+    pullback = config["strategy"].get("pullback_in_uptrend", {})
+    if not pullback.get("enabled", False):
+        return False
+
+    if latest.close <= sma50 or latest.close <= sma200:
+        return False
+    if relative_strength < float(pullback.get("min_relative_strength_pct", 0.0)):
+        return False
+
+    ema_days = int(pullback.get("ema_days", 20))
+    moving_average = ema(closes, ema_days) or sma(closes, ema_days)
+    if moving_average is None:
+        return False
+
+    lookback = int(pullback.get("lookback_days", 8))
+    if len(bars) < lookback + 2:
+        return False
+    recent = bars[-lookback - 1 : -1]
+    recent_high = max(bar.close for bar in recent)
+    pullback_pct = percent_change(recent_high, min(bar.low for bar in bars[-lookback:]))
+    if pullback_pct < float(pullback.get("min_pullback_pct", 1.5)):
+        return False
+    if pullback_pct > float(pullback.get("max_pullback_pct", 8.0)):
+        return False
+
+    max_distance = float(pullback.get("max_distance_above_ema_pct", 3.0))
+    if latest.close > moving_average * (1.0 + max_distance / 100.0):
+        return False
+    if latest.low > moving_average * (1.0 + max_distance / 100.0):
+        return False
+
+    rsi_value = rsi(closes, int(pullback.get("rsi_days", 14)))
+    if rsi_value is not None:
+        if rsi_value < float(pullback.get("rsi_min", 40.0)) or rsi_value > float(pullback.get("rsi_max", 65.0)):
+            return False
+
+    min_volume = float(pullback.get("min_volume_ratio", 0.7))
+    if latest_volume_ratio is not None and latest_volume_ratio < min_volume:
+        return False
+
+    trigger = str(pullback.get("entry_trigger", "reclaim_prior_high_or_ema"))
+    if trigger == "reclaim_ema":
+        return latest.close > moving_average and latest.close > prior.close
+    return (latest.close > prior.high or latest.close > moving_average) and latest.close > prior.close
+
+
+def sector_relative_metrics(
+    symbol: str,
+    bars: list[Bar],
+    sector_bars_by_symbol: dict[str, list[Bar]],
+    config: dict[str, Any],
+) -> tuple[float | None, float | None]:
+    sector_config = config["strategy"].get("sector_relative_momentum", {})
+    if not sector_config.get("enabled", False):
+        return None, None
+
+    proxy_map = sector_config.get("group_proxy_symbols", {})
+    proxy_symbol = proxy_map.get(symbol_group(symbol, config))
+    if not proxy_symbol:
+        return None, None
+    proxy_bars = sector_bars_by_symbol.get(str(proxy_symbol).upper())
+    days = int(sector_config.get("lookback_days", config["strategy"]["relative_strength_days"]))
+    if not proxy_bars or len(proxy_bars) < days + 1 or len(bars) < days + 1:
+        return None, None
+
+    stock_return = percent_change(bars[-1].close, bars[-days - 1].close)
+    sector_return = percent_change(proxy_bars[-1].close, proxy_bars[-days - 1].close)
+    return stock_return - sector_return, sector_return
+
+
+def recent_drawdown_pct(bars: list[Bar], lookback: int) -> float | None:
+    if len(bars) < lookback + 1:
+        return None
+    recent_high = max(bar.high for bar in bars[-lookback - 1 : -1])
+    if recent_high <= 0:
+        return None
+    return percent_change(recent_high, bars[-1].close)
+
+
+def bullish_reversal_ok(latest: Bar, prior: Bar) -> bool:
+    return latest.close > prior.close and latest.close > latest.open
+
+
+def setup_exit_multiples(setup_type: str, config: dict[str, Any]) -> tuple[float, float]:
+    defaults = config["risk"]
+    setup_exits = config["strategy"].get("setup_exit_profiles", {})
+    profile = setup_exits.get(setup_type, {})
+    partial = float(profile.get("partial_profit_r_multiple", defaults["partial_profit_r_multiple"]))
+    target = float(profile.get("target_r_multiple", defaults["synthetic_profit_target_r_multiple"]))
+    return partial, target
+
+
+def setup_weight(setup_type: str, config: dict[str, Any]) -> float:
+    return float(config["strategy"].get("setup_rank_weights", {}).get(setup_type, 1.0))
+
+
+def setup_enabled(setup_type: str, config: dict[str, Any]) -> bool:
+    setup_config = config["strategy"].get(setup_type, {})
+    return bool(setup_config.get("enabled", True))
+
+
+def evaluate_momentum_breakout(
+    bars: list[Bar],
+    latest: Bar,
+    prior: Bar,
+    sma50: float,
+    sma200: float,
+    relative_strength: float,
+    latest_volume_ratio: float | None,
+    config: dict[str, Any],
+) -> SetupSignal | None:
+    if not setup_enabled("momentum_breakout", config):
+        return None
+    strategy = config["strategy"]
+    if latest.close <= sma50 or latest.close <= sma200:
+        return None
+    if relative_strength < minimum_relative_strength(config):
+        return None
+    min_volume = float(strategy.get("volume_confirmation", {}).get("min_ratio", 1.2))
+    if relaxed_entry_enabled(config):
+        min_volume = float(relaxed_entry_config(config).get("volume_min_ratio", min_volume))
+    if latest_volume_ratio is None or latest_volume_ratio < min_volume:
+        return None
+    if not prior_high_breakout_ok(latest, prior, config):
+        return None
+    if not has_pullback_or_consolidation(bars, int(strategy["pullback_lookback_days"])):
+        return None
+    partial, target = setup_exit_multiples("momentum_breakout", config)
+    return SetupSignal(
+        setup_type="momentum_breakout",
+        score=relative_strength + ((latest_volume_ratio or 1.0) * 2.0),
+        reason=f"momentum breakout setup, above 50/200-day averages, +{relative_strength:.2f}% 20-day RS vs SPY",
+        partial_target_r_multiple=partial,
+        target_r_multiple=target,
+    )
+
+
+def evaluate_momentum_continuation(
+    latest: Bar,
+    prior: Bar,
+    sma50: float,
+    sma200: float,
+    relative_strength: float,
+    latest_volume_ratio: float | None,
+    config: dict[str, Any],
+) -> SetupSignal | None:
+    if not setup_enabled("momentum_continuation", config):
+        return None
+    if not momentum_continuation_ok(latest, prior, sma50, sma200, relative_strength, latest_volume_ratio, config):
+        return None
+    partial, target = setup_exit_multiples("momentum_continuation", config)
+    return SetupSignal(
+        setup_type="momentum_continuation",
+        score=relative_strength + ((latest_volume_ratio or 1.0) * 1.5),
+        reason=f"momentum continuation setup, above 50/200-day averages, +{relative_strength:.2f}% 20-day RS vs SPY",
+        partial_target_r_multiple=partial,
+        target_r_multiple=target,
+    )
+
+
+def evaluate_pullback_in_uptrend(
+    bars: list[Bar],
+    latest: Bar,
+    prior: Bar,
+    closes: list[float],
+    sma50: float,
+    sma200: float,
+    relative_strength: float,
+    latest_volume_ratio: float | None,
+    config: dict[str, Any],
+) -> SetupSignal | None:
+    if not pullback_in_uptrend_ok(bars, latest, prior, closes, sma50, sma200, relative_strength, latest_volume_ratio, config):
+        return None
+    partial, target = setup_exit_multiples("pullback_in_uptrend", config)
+    return SetupSignal(
+        setup_type="pullback_in_uptrend",
+        score=max(relative_strength, 0.0) + 4.0,
+        reason=f"pullback-in-uptrend setup, above 50/200-day averages, +{relative_strength:.2f}% 20-day RS vs SPY",
+        partial_target_r_multiple=partial,
+        target_r_multiple=target,
+    )
+
+
+def evaluate_sector_relative_pullback(
+    bars: list[Bar],
+    latest: Bar,
+    prior: Bar,
+    closes: list[float],
+    sma200: float,
+    spy_return: float,
+    sector_rs: float | None,
+    sector_momentum: float | None,
+    latest_volume_ratio: float | None,
+    config: dict[str, Any],
+) -> SetupSignal | None:
+    setup = config["strategy"].get("sector_relative_pullback", {})
+    if not setup.get("enabled", False):
+        return None
+    if latest.close <= sma200:
+        return None
+    if sector_rs is None or sector_momentum is None:
+        return None
+    sector_vs_spy = sector_momentum - spy_return
+    if sector_vs_spy < float(setup.get("min_sector_vs_spy_pct", 0.0)):
+        return None
+    if sector_rs > float(setup.get("max_stock_vs_sector_pct", -0.5)):
+        return None
+    if sector_rs < float(setup.get("min_stock_vs_sector_pct", -8.0)):
+        return None
+    rsi_value = rsi(closes, int(setup.get("rsi_days", 14)))
+    if rsi_value is not None:
+        if rsi_value < float(setup.get("rsi_min", 35.0)) or rsi_value > float(setup.get("rsi_max", 60.0)):
+            return None
+    if latest_volume_ratio is not None and latest_volume_ratio < float(setup.get("min_volume_ratio", 0.6)):
+        return None
+    ema_days = int(setup.get("ema_days", 20))
+    moving_average = ema(closes, ema_days) or sma(closes, ema_days)
+    if moving_average is None:
+        return None
+    if not (bullish_reversal_ok(latest, prior) or latest.close > moving_average):
+        return None
+    partial, target = setup_exit_multiples("sector_relative_pullback", config)
+    return SetupSignal(
+        setup_type="sector_relative_pullback",
+        score=abs(sector_rs) + max(sector_vs_spy, 0.0) + 2.0,
+        reason=f"sector-relative pullback setup, sector beat SPY by {sector_vs_spy:.2f}% while stock lagged sector by {abs(sector_rs):.2f}%",
+        partial_target_r_multiple=partial,
+        target_r_multiple=target,
+        max_gap_pct=float(setup.get("max_gap_pct", config["strategy"]["next_session_max_gap_pct"])),
+    )
+
+
+def evaluate_quality_range_reversion(
+    symbol: str,
+    bars: list[Bar],
+    latest: Bar,
+    prior: Bar,
+    closes: list[float],
+    sma200: float,
+    latest_volume_ratio: float | None,
+    config: dict[str, Any],
+) -> SetupSignal | None:
+    setup = config["strategy"].get("quality_range_reversion", {})
+    if not setup.get("enabled", False):
+        return None
+    allowed_groups = set(setup.get("allowed_groups", []))
+    if allowed_groups and symbol_group(symbol, config) not in allowed_groups:
+        return None
+    if latest.close <= sma200:
+        return None
+    if latest.close < float(setup.get("min_price", 10.0)):
+        return None
+    drawdown = recent_drawdown_pct(bars, int(setup.get("lookback_days", 20)))
+    if drawdown is None:
+        return None
+    if drawdown < float(setup.get("min_drawdown_pct", 3.0)) or drawdown > float(setup.get("max_drawdown_pct", 12.0)):
+        return None
+    rsi_value = rsi(closes, int(setup.get("rsi_days", 14)))
+    if rsi_value is not None:
+        if rsi_value < float(setup.get("rsi_min", 30.0)) or rsi_value > float(setup.get("rsi_max", 48.0)):
+            return None
+    if latest_volume_ratio is not None and latest_volume_ratio < float(setup.get("min_volume_ratio", 0.5)):
+        return None
+    if not bullish_reversal_ok(latest, prior):
+        return None
+    partial, target = setup_exit_multiples("quality_range_reversion", config)
+    return SetupSignal(
+        setup_type="quality_range_reversion",
+        score=drawdown + 2.0,
+        reason=f"quality range-reversion setup, {drawdown:.2f}% pullback above 200-day average with bullish reversal",
+        partial_target_r_multiple=partial,
+        target_r_multiple=target,
+        max_gap_pct=float(setup.get("max_gap_pct", config["strategy"]["next_session_max_gap_pct"])),
+    )
+
+
+def choose_setup_signal(signals: list[SetupSignal], config: dict[str, Any]) -> SetupSignal | None:
+    if not signals:
+        return None
+    return max(signals, key=lambda item: item.score * setup_weight(item.setup_type, config))
 
 
 def candidate_stop(latest: Bar, bars: list[Bar], config: dict[str, Any]) -> tuple[float, str, float | None]:
@@ -272,6 +657,43 @@ def max_positions_per_group(account_value: float, config: dict[str, Any]) -> int
     return int(concentration.get("max_positions_per_group_standard", 1))
 
 
+def allow_add_to_existing_positions(config: dict[str, Any]) -> bool:
+    return bool(config["strategy"].get("allow_add_to_existing_positions", False))
+
+
+def option_intent_for_candidate(item: Candidate, config: dict[str, Any]) -> dict[str, Any] | None:
+    options = config.get("options_strategy", {})
+    if not config.get("execution", {}).get("allow_options", False) or not options.get("enabled", False):
+        return None
+
+    strategy = str(options.get("default_signal_strategy", "long_call"))
+    if strategy not in set(options.get("strategies", [])):
+        return None
+    option_type = "call" if strategy == "long_call" else "put"
+    return {
+        "enabled": True,
+        "strategy": strategy,
+        "underlying_symbol": item.symbol,
+        "underlying_type": "equity",
+        "option_type": option_type,
+        "position_effect": "open",
+        "side": "buy",
+        "min_dte": int(options.get("min_dte", 30)),
+        "max_dte": int(options.get("max_dte", 60)),
+        "target_delta_min": float(options.get("target_delta_min", 0.35)),
+        "target_delta_max": float(options.get("target_delta_max", 0.60)),
+        "max_bid_ask_spread_pct": float(options.get("max_bid_ask_spread_pct", 15.0)),
+        "min_open_interest": int(options.get("min_open_interest", 100)),
+        "min_volume": int(options.get("min_volume", 10)),
+        "premium_risk_mode": str(options.get("premium_risk_mode", "full_premium_at_risk")),
+        "max_contracts": int(options.get("max_contracts_per_trade", 1)),
+        "order_type": str(options.get("order_type", "limit")),
+        "time_in_force": str(options.get("time_in_force", "gfd")),
+        "market_hours": str(options.get("market_hours", "regular_hours")),
+        "note": "Orchestrator must resolve chain, instrument, quote, and liquidity before staging an option order.",
+    }
+
+
 def earnings_blackout_reason(item: dict[str, Any], signal_date: str, config: dict[str, Any]) -> str | None:
     blackout_days = int(config["strategy"].get("earnings_blackout_days", 0))
     if blackout_days <= 0:
@@ -353,6 +775,7 @@ def scan_symbol(
     news_snapshot: dict[str, Any] | None = None,
     max_trade_risk_dollars: float | None = None,
     apply_news_filter: bool = True,
+    sector_bars_by_symbol: dict[str, list[Bar]] | None = None,
 ) -> Candidate | None:
     strategy = config["strategy"]
     risk = config["risk"]
@@ -381,32 +804,45 @@ def scan_symbol(
     sma200 = sma(closes, 200)
     if sma50 is None or sma200 is None:
         return None
-    if latest.close <= sma50 or latest.close <= sma200:
-        return None
 
     stock_return = percent_change(latest.close, closes[-rs_days - 1])
     spy_return = percent_change(spy_closes[-1], spy_closes[-rs_days - 1])
     relative_strength = stock_return - spy_return
-    if relative_strength <= 0:
-        return None
 
-    if latest.close <= prior.high:
-        return None
+    latest_volume_ratio = volume_ratio(bars, int(strategy.get("volume_confirmation", {}).get("lookback_days", 20)))
+    sector_rs, sector_momentum = sector_relative_metrics(symbol, bars, sector_bars_by_symbol or {}, config)
 
     same_day_move = percent_change(latest.close, prior.close)
     if same_day_move > float(strategy["same_day_chase_limit_pct"]):
         return None
 
-    if not has_pullback_or_consolidation(bars, int(strategy["pullback_lookback_days"])):
+    signals = [
+        signal
+        for signal in [
+            evaluate_momentum_breakout(bars, latest, prior, sma50, sma200, relative_strength, latest_volume_ratio, config),
+            evaluate_momentum_continuation(latest, prior, sma50, sma200, relative_strength, latest_volume_ratio, config),
+            evaluate_pullback_in_uptrend(
+                bars, latest, prior, closes, sma50, sma200, relative_strength, latest_volume_ratio, config
+            ),
+            evaluate_sector_relative_pullback(
+                bars,
+                latest,
+                prior,
+                closes,
+                sma200,
+                spy_return,
+                sector_rs,
+                sector_momentum,
+                latest_volume_ratio,
+                config,
+            ),
+            evaluate_quality_range_reversion(symbol, bars, latest, prior, closes, sma200, latest_volume_ratio, config),
+        ]
+        if signal is not None
+    ]
+    setup_signal = choose_setup_signal(signals, config)
+    if setup_signal is None:
         return None
-
-    volume_config = strategy.get("volume_confirmation", {})
-    latest_volume_ratio = volume_ratio(bars, int(volume_config.get("lookback_days", 20)))
-    if volume_config.get("enabled", False):
-        if latest_volume_ratio is None:
-            return None
-        if latest_volume_ratio < float(volume_config.get("min_ratio", 1.2)):
-            return None
 
     stop, stop_method, atr_value = candidate_stop(latest, bars, config)
     stop_distance_pct = percent_distance(latest.close, stop)
@@ -421,7 +857,10 @@ def scan_symbol(
         news_score = 0.0
         news_summary = "news not evaluated in deterministic prescreen"
 
-    max_entry = max_next_session_entry(latest.close, adaptive_gap_pct(relative_strength, news_score, config))
+    max_gap_pct = setup_signal.max_gap_pct
+    if max_gap_pct is None:
+        max_gap_pct = adaptive_gap_pct(relative_strength, news_score, config)
+    max_entry = max_next_session_entry(latest.close, max_gap_pct)
     shares, position_value, max_loss = position_size(
         account_value=account_value,
         settled_cash=settled_cash,
@@ -434,31 +873,45 @@ def scan_symbol(
     if shares < 1:
         return None
 
-    partial_target = r_multiple_target(latest.close, stop, float(risk["partial_profit_r_multiple"]))
-    profit_target = r_multiple_target(latest.close, stop, float(risk["synthetic_profit_target_r_multiple"]))
+    partial_target = r_multiple_target(latest.close, stop, setup_signal.partial_target_r_multiple)
+    profit_target = r_multiple_target(latest.close, stop, setup_signal.target_r_multiple)
     reward_risk_ratio = (profit_target - latest.close) / (latest.close - stop)
     if reward_risk_ratio < float(strategy["min_reward_risk_ratio"]):
         return None
     news_weight = float(strategy.get("news_filter", {}).get("rank_weight", 0.0))
-    combined_rank_score = relative_strength + (news_score * news_weight)
-
-    reason = (
-        f"above 50/200-day averages, +{relative_strength:.2f}% 20-day RS vs SPY, "
-        "close above prior high after pullback/consolidation"
+    sector_config = strategy.get("sector_relative_momentum", {})
+    sector_weight = float(sector_config.get("rank_weight", 0.0)) if sector_config.get("enabled", False) else 0.0
+    sector_score = sector_rs if sector_rs is not None else 0.0
+    sector_momentum_score = sector_momentum - spy_return if sector_momentum is not None else 0.0
+    combined_rank_score = (
+        setup_signal.score * setup_weight(setup_signal.setup_type, config)
+        + (relative_strength * 0.35)
+        + (sector_score * sector_weight)
+        + (sector_momentum_score * sector_weight * 0.5)
+        + (news_score * news_weight)
     )
+
+    reason = setup_signal.reason
+    if sector_rs is not None:
+        reason = f"{reason}; stock vs sector {sector_rs:.2f}%"
+    if sector_momentum is not None:
+        reason = f"{reason}; sector momentum {sector_momentum:.2f}%"
+    if relaxed_entry_enabled(config):
+        reason = f"{reason}; relaxed entry filters active"
     if latest_volume_ratio is not None:
         reason = f"{reason}; volume {latest_volume_ratio:.2f}x 20-day average"
     if strategy.get("news_filter", {}).get("enabled", False):
         reason = f"{reason}; news score {news_score:g} ({news_summary})"
     exit_plan = (
         f"initial {stop_method} stop {stop:.2f}; consider partial profit at "
-        f"{partial_target:.2f} (1R); target {profit_target:.2f} "
-        f"({float(risk['synthetic_profit_target_r_multiple']):g}R); "
-        f"trail remainder by {float(risk['trailing_stop_pct']):g}% or a close below the 20-day average"
+            f"{partial_target:.2f} ({setup_signal.partial_target_r_multiple:g}R); target {profit_target:.2f} "
+            f"({setup_signal.target_r_multiple:g}R); "
+            f"trail remainder by {float(risk['trailing_stop_pct']):g}% or a close below the 20-day average"
     )
     return Candidate(
         symbol=symbol,
         date=latest.date,
+        setup_type=setup_signal.setup_type,
         entry=latest.close,
         max_entry=max_entry,
         stop=stop,
@@ -471,6 +924,8 @@ def scan_symbol(
         reward_risk_ratio=reward_risk_ratio,
         sector_group=symbol_group(symbol, config),
         relative_strength_pct=relative_strength,
+        sector_relative_strength_pct=sector_rs,
+        sector_momentum_pct=sector_momentum,
         volume_ratio=latest_volume_ratio,
         atr=atr_value,
         stop_method=stop_method,
@@ -617,22 +1072,24 @@ def revalidate_candidate(
     )
     if shares < 1:
         return None
-    partial_target = r_multiple_target(live_price, candidate.stop, float(risk["partial_profit_r_multiple"]))
-    profit_target = r_multiple_target(live_price, candidate.stop, float(risk["synthetic_profit_target_r_multiple"]))
+    partial_multiple, target_multiple = setup_exit_multiples(candidate.setup_type, config)
+    partial_target = r_multiple_target(live_price, candidate.stop, partial_multiple)
+    profit_target = r_multiple_target(live_price, candidate.stop, target_multiple)
     reward_risk_ratio = (profit_target - live_price) / (live_price - candidate.stop)
     if reward_risk_ratio < float(config["strategy"]["min_reward_risk_ratio"]):
         return None
 
     exit_plan = (
         f"initial stop {candidate.stop:.2f}; consider partial profit at "
-        f"{partial_target:.2f} (1R); target {profit_target:.2f} "
-        f"({float(risk['synthetic_profit_target_r_multiple']):g}R); "
+        f"{partial_target:.2f} ({partial_multiple:g}R); target {profit_target:.2f} "
+        f"({target_multiple:g}R); "
         f"trail remainder by {float(risk['trailing_stop_pct']):g}% or a close below the 20-day average"
     )
 
     return Candidate(
         symbol=candidate.symbol,
         date=candidate.date,
+        setup_type=candidate.setup_type,
         entry=live_price,
         max_entry=candidate.max_entry,
         stop=candidate.stop,
@@ -645,6 +1102,8 @@ def revalidate_candidate(
         reward_risk_ratio=reward_risk_ratio,
         sector_group=candidate.sector_group,
         relative_strength_pct=candidate.relative_strength_pct,
+        sector_relative_strength_pct=candidate.sector_relative_strength_pct,
+        sector_momentum_pct=candidate.sector_momentum_pct,
         volume_ratio=candidate.volume_ratio,
         atr=candidate.atr,
         stop_method=candidate.stop_method,
@@ -672,7 +1131,10 @@ def main() -> int:
     parser.add_argument(
         "--held-symbols",
         default="",
-        help="Comma-separated symbols or JSON array already held; held symbols are excluded from new-buy candidates.",
+        help=(
+            "Comma-separated symbols or JSON array already held. Held symbols are eligible add-ons when "
+            "strategy.allow_add_to_existing_positions is true."
+        ),
     )
     parser.add_argument(
         "--open-risk-dollars",
@@ -744,10 +1206,16 @@ def main() -> int:
         max_positions = int(risk["max_positions_under_5000"])
         output["messages"].append(f"Under $5k concentrated mode active: max positions set to {max_positions}.")
 
-    if args.positions_count >= max_positions:
+    add_to_existing_allowed = allow_add_to_existing_positions(config)
+    new_position_slots = max(0, max_positions - args.positions_count)
+    if args.positions_count >= max_positions and not add_to_existing_allowed:
         output["status"] = "full"
         output["messages"].append("New trades blocked: maximum open positions reached.")
         return emit(output, args.json)
+    if args.positions_count >= max_positions and add_to_existing_allowed:
+        output["messages"].append(
+            "New symbols blocked: maximum open positions reached; add-ons to held symbols remain eligible."
+        )
 
     total_open_risk_cap = args.account_value * (float(risk["total_open_risk_pct"]) / 100.0)
     remaining_open_risk = total_open_risk_cap - open_risk_dollars
@@ -765,20 +1233,33 @@ def main() -> int:
 
     benchmark = strategy["benchmark_symbol"]
     spy_bars = load_bars(prices_dir / f"{benchmark}.csv")
+    sector_bars_by_symbol: dict[str, list[Bar]] = {}
+    sector_config = strategy.get("sector_relative_momentum", {})
+    if sector_config.get("enabled", False):
+        proxy_symbols = {
+            str(symbol).upper()
+            for symbol in sector_config.get("group_proxy_symbols", {}).values()
+            if str(symbol).upper() != benchmark
+        }
+        for proxy_symbol in proxy_symbols:
+            proxy_path = prices_dir / f"{proxy_symbol}.csv"
+            if proxy_path.exists():
+                sector_bars_by_symbol[proxy_symbol] = load_bars(proxy_path)
 
     symbols = list(strategy["trade_universe"])
     if args.account_value < float(risk["funding_minimum_standard_usd"]) and bool(risk["under_5000_prefer_etfs"]):
         symbols = [symbol for symbol in symbols if symbol in ETF_SYMBOLS]
 
     candidates: list[Candidate] = []
-    slots = max_positions - args.positions_count
+    slots = max(1, new_position_slots) if add_to_existing_allowed else new_position_slots
     held_groups = held_group_counts(held_symbols, config)
     max_group_positions = max_positions_per_group(args.account_value, config)
     for symbol in symbols:
         if symbol == benchmark:
             continue
-        if symbol.upper() in held_symbols:
-            output["messages"].append(f"{symbol} skipped: already held.")
+        is_held_symbol = symbol.upper() in held_symbols
+        if not is_held_symbol and new_position_slots <= 0:
+            output["messages"].append(f"{symbol} skipped: maximum open positions reached for new symbols.")
             continue
         group = symbol_group(symbol, config)
         concentration = strategy.get("sector_concentration", {})
@@ -799,6 +1280,7 @@ def main() -> int:
             news_snapshot,
             remaining_open_risk,
             apply_news_filter=not args.prescreen_news_symbols_only,
+            sector_bars_by_symbol=sector_bars_by_symbol,
         )
         if candidate:
             candidates.append(candidate)
@@ -846,6 +1328,7 @@ def main() -> int:
         {
             "symbol": item.symbol,
             "date": item.date,
+            "setup_type": item.setup_type,
             "setup": item.reason,
             "signal_entry": round(item.entry, 2) if not live_prices else None,
             "validated_entry": round(item.entry, 2) if live_prices else None,
@@ -860,6 +1343,10 @@ def main() -> int:
             "target_price": round(item.profit_target, 2),
             "reward_risk_ratio": round(item.reward_risk_ratio, 2),
             "relative_strength_pct": round(item.relative_strength_pct, 2),
+            "sector_relative_strength_pct": round(item.sector_relative_strength_pct, 2)
+            if item.sector_relative_strength_pct is not None
+            else None,
+            "sector_momentum_pct": round(item.sector_momentum_pct, 2) if item.sector_momentum_pct is not None else None,
             "volume_ratio": round(item.volume_ratio, 2) if item.volume_ratio is not None else None,
             "atr": round(item.atr, 2) if item.atr is not None else None,
             "stop_method": item.stop_method,
@@ -868,6 +1355,7 @@ def main() -> int:
             "combined_rank_score": round(item.combined_rank_score, 2),
             "exit_plan": item.exit_plan,
             "order_instruction": "Use a regular-hours limit order at or below max_next_session_entry after broker review.",
+            "option_candidate": option_intent_for_candidate(item, config),
             "protective_stop_order": {
                 "enabled": bool(config["execution"]["auto_place_protective_stop_after_buy_fill"]),
                 "submit_after_buy_fill": True,
@@ -882,9 +1370,9 @@ def main() -> int:
             "synthetic_profit_target": {
                 "enabled": bool(config["execution"]["auto_monitor_synthetic_profit_target"]),
                 "partial_target_price": round(item.partial_target, 2),
-                "partial_target_r_multiple": float(risk["partial_profit_r_multiple"]),
+                "partial_target_r_multiple": setup_exit_multiples(item.setup_type, config)[0],
                 "target_price": round(item.profit_target, 2),
-                "target_r_multiple": float(risk["synthetic_profit_target_r_multiple"]),
+                "target_r_multiple": setup_exit_multiples(item.setup_type, config)[1],
                 "monitoring_mode": risk["profit_target_mode"],
                 "order_type": risk["profit_target_order_type"],
                 "default_action": risk["profit_target_default_action"],
@@ -923,7 +1411,7 @@ def emit(output: dict[str, Any], as_json: bool) -> int:
         print(f"- {message}")
     for item in output["candidates"]:
         print()
-        print(f"{item['symbol']} reviewed candidate for {item['date']}")
+        print(f"{item['symbol']} reviewed candidate for {item['date']} ({item['setup_type']})")
         print(f"  Setup: {item['setup']}")
         entry_label = "Validated entry" if item["validated_entry"] is not None else "Signal entry"
         entry_value = item["validated_entry"] if item["validated_entry"] is not None else item["signal_entry"]
@@ -940,6 +1428,8 @@ def emit(output: dict[str, Any], as_json: bool) -> int:
         )
         print(
             f"  Rank inputs: RS {item['relative_strength_pct']}% | "
+            f"Sector RS {item['sector_relative_strength_pct'] if item['sector_relative_strength_pct'] is not None else 'n/a'}% | "
+            f"Sector mom {item['sector_momentum_pct'] if item['sector_momentum_pct'] is not None else 'n/a'}% | "
             f"Volume {item['volume_ratio'] if item['volume_ratio'] is not None else 'n/a'}x | "
             f"News {item['news_score']} | Combined {item['combined_rank_score']}"
         )

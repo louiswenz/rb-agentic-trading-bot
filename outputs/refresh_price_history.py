@@ -24,18 +24,36 @@ from typing import Any
 CSV_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume"]
 
 
+YAHOO_SYMBOL_OVERRIDES = {
+    "VIX": "^VIX",
+}
+
+
+def yahoo_symbol(symbol: str) -> str:
+    return YAHOO_SYMBOL_OVERRIDES.get(symbol.upper(), symbol)
+
+
 def load_universe(config_path: Path) -> list[str]:
     with config_path.open("r", encoding="utf-8") as handle:
         config = json.load(handle)
-    symbols = config.get("strategy", {}).get("trade_universe", [])
-    excluded = set(config.get("strategy", {}).get("excluded_symbols", []))
+    strategy = config.get("strategy", {})
+    symbols = strategy.get("trade_universe", [])
+    market_risk_indicators = strategy.get("market_risk_indicators", [])
+    excluded = {str(symbol).upper().strip() for symbol in strategy.get("excluded_symbols", [])}
     if not isinstance(symbols, list):
         raise ValueError("strategy.trade_universe must be a list")
-    return [
-        str(symbol).upper().strip()
-        for symbol in symbols
-        if str(symbol).upper().strip() and str(symbol).upper().strip() not in excluded
-    ]
+    if not isinstance(market_risk_indicators, list):
+        raise ValueError("strategy.market_risk_indicators must be a list when present")
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_symbol in [*symbols, *market_risk_indicators]:
+        symbol = str(raw_symbol).upper().strip()
+        if not symbol or symbol in excluded or symbol in seen:
+            continue
+        normalized.append(symbol)
+        seen.add(symbol)
+    return normalized
 
 
 def yahoo_chart_url(symbol: str, start: datetime, end: datetime) -> str:
@@ -128,7 +146,8 @@ def refresh(
 
     for symbol in symbols:
         try:
-            data = fetch_json(yahoo_chart_url(symbol, start, end), timeout)
+            source_symbol = yahoo_symbol(symbol)
+            data = fetch_json(yahoo_chart_url(source_symbol, start, end), timeout)
             if raw_dir:
                 (raw_dir / f"yahoo_{symbol}.json").write_text(json.dumps(data), encoding="utf-8")
             rows = rows_from_yahoo_chart(symbol, data)

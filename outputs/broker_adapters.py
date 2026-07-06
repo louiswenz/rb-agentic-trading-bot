@@ -76,6 +76,12 @@ class MockBrokerAdapter:
         action_type = action["type"]
         if action_type == "review_and_place_equity_buy":
             return self._paper_buy(action)
+        if action_type == "review_and_place_option_buy_to_open":
+            return self._paper_option_buy(action)
+        if action_type == "review_and_place_option_sell_to_close":
+            return self._paper_option_sell(action)
+        if action_type == "cancel_option_order":
+            return {"status": "cancelled", "action": action}
         if action_type == "place_protective_stop":
             return self._paper_order(action, state="open")
         if action_type == "arm_synthetic_profit_target":
@@ -166,6 +172,62 @@ class MockBrokerAdapter:
         self.data.setdefault("orders", []).append(order)
         self._save()
         return {"status": "filled", "order": order, "fill": {"symbol": action["symbol"], "quantity": sell_quantity}}
+
+    def _paper_option_buy(self, action: dict[str, Any]) -> dict[str, Any]:
+        quantity = int(action["quantity"])
+        price = float(action["price"])
+        cost = quantity * price * 100.0
+        account = self.data["account"]
+        if cost > float(account.get("buying_power", 0.0)):
+            return {"status": "rejected", "reason": "insufficient_buying_power", "action": action}
+
+        account["buying_power"] = round(float(account["buying_power"]) - cost, 2)
+        account.setdefault("option_positions", []).append(
+            {
+                "symbol": action["symbol"],
+                "option_id": action["option_id"],
+                "quantity": quantity,
+                "average_price": price,
+                "type": "long",
+                "option_type": action.get("option_type"),
+            }
+        )
+        order = {
+            "id": f"mock-{len(self.data.get('orders', [])) + 1}",
+            "source": "agentic",
+            "state": "filled",
+            **action,
+        }
+        self.data.setdefault("orders", []).append(order)
+        self._save()
+        return {"status": "filled", "order": order}
+
+    def _paper_option_sell(self, action: dict[str, Any]) -> dict[str, Any]:
+        quantity = int(action["quantity"])
+        price = float(action["price"])
+        account = self.data["account"]
+        positions = account.get("option_positions", [])
+        position = next((item for item in positions if item.get("option_id") == action.get("option_id")), None)
+        if not position:
+            return {"status": "rejected", "reason": "no_option_position", "action": action}
+
+        close_quantity = min(quantity, int(position["quantity"]))
+        account["buying_power"] = round(float(account["buying_power"]) + close_quantity * price * 100.0, 2)
+        remaining = int(position["quantity"]) - close_quantity
+        if remaining <= 0:
+            account["option_positions"] = [item for item in positions if item is not position]
+        else:
+            position["quantity"] = remaining
+        order = {
+            "id": f"mock-{len(self.data.get('orders', [])) + 1}",
+            "source": "agentic",
+            "state": "filled",
+            **action,
+            "quantity": str(close_quantity),
+        }
+        self.data.setdefault("orders", []).append(order)
+        self._save()
+        return {"status": "filled", "order": order}
 
 
 class RobinhoodAdapter:

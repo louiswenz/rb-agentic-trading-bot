@@ -17,7 +17,7 @@ Date: 2026-06-20
 - Local readiness verifier passes.
 - Behavior tests for monitor decisions are present in `test_agentic_monitor.py`.
 - Robinhood MCP login succeeded.
-- Robinhood MCP tool approvals are configured for required read-only snapshot tools and equity-only review/place/cancel tools.
+- Robinhood MCP tool approvals are configured for required read-only snapshot tools, equity review/place/cancel tools, and must include option review/place/cancel tools before live option trading can be enabled.
 
 ## Trading Rules Confirmed
 
@@ -26,7 +26,9 @@ Date: 2026-06-20
 - Elevated monitoring: 3600 seconds.
 - Minimum new-buy reward/risk: 1.5R.
 - Total open-risk cap: 6% of account value.
-- Sector/group concentration cap is enabled.
+- Sector/group concentration cap is disabled.
+- Long option support is approval-gated; live option trading remains blocked unless the Agentic account reports option level 2 or 3.
+- Long option exits are automated with premium target, premium stop, DTE time stop, and underlying-stop triggers.
 - Earnings blackout is enabled when earnings timing is supplied.
 - Protective broker-side stop required after buy fill.
 - R-based synthetic profit target tracked by monitor.
@@ -63,4 +65,4 @@ The current chat thread still does not directly expose Robinhood tools through i
 
 ## Completion Status
 
-The local strategy, monitor, runbook, automation schedule, Robinhood MCP login, and read-only broker handshake are implemented and verified. Live trading remains governed by the configured hard caps, equity-only asset scope, broker-side protective stop requirement, synthetic profit target workflow, and runtime pause policy for missing broker data or failed stop replacement.
+The local strategy, monitor, runbook, automation schedule, Robinhood MCP login, and read-only broker handshake are implemented and verified. Live trading remains governed by the configured hard caps, equity and approval-gated long-option scope, broker-side protective stop requirement for equity positions, synthetic profit target workflow, and runtime pause policy for missing broker data or failed stop replacement.

@@ -47,6 +47,38 @@ def base_candidate(symbol: str = "AMD") -> dict:
     }
 
 
+def base_option_candidate(symbol: str = "AMD") -> dict:
+    candidate = base_candidate(symbol)
+    candidate.update(
+        {
+            "asset_type": "option",
+            "option_strategy": "long_call",
+            "option_type": "call",
+            "option_id": "option-1",
+            "option_limit_price": 1.0,
+            "contracts": 1,
+            "max_loss": 100.0,
+            "chain_symbol": symbol,
+            "underlying_type": "equity",
+        }
+    )
+    return candidate
+
+
+def base_option_position(symbol: str = "AMD") -> dict:
+    return {
+        "asset_type": "option",
+        "symbol": symbol,
+        "chain_symbol": symbol,
+        "option_id": "option-1",
+        "quantity": 1,
+        "average_price": 1.0,
+        "option_type": "call",
+        "expiration_date": "2026-07-31",
+        "underlying_stop_price": 92.0,
+    }
+
+
 class AgenticMonitorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = load_config()
@@ -101,6 +133,226 @@ class AgenticMonitorTests(unittest.TestCase):
 
         self.assertEqual(result.actions, [])
 
+    def test_option_candidate_blocks_without_account_approval(self) -> None:
+        account = base_account()
+        account["agentic_allowed"] = True
+        account["option_level"] = ""
+
+        result = self.run_monitor(
+            account=account,
+            quotes={"AMD": {"price": 101.0}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
+            candidates=[base_option_candidate("AMD")],
+        )
+
+        self.assertEqual(result.actions, [])
+        self.assertIn("option_trading_not_approved", [item["kind"] for item in result.events])
+
+    def test_option_candidate_creates_buy_to_open_action_when_approved(self) -> None:
+        account = base_account()
+        account["agentic_allowed"] = True
+        account["option_level"] = "option_level_2"
+
+        result = self.run_monitor(
+            account=account,
+            quotes={"AMD": {"price": 101.0}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
+            candidates=[base_option_candidate("AMD")],
+        )
+
+        self.assertEqual(len(result.actions), 1)
+        action = result.actions[0]
+        self.assertEqual(action["type"], "review_and_place_option_buy_to_open")
+        self.assertEqual(action["chain_symbol"], "AMD")
+        self.assertEqual(action["legs"][0]["position_effect"], "open")
+        self.assertEqual(action["legs"][0]["side"], "buy")
+        self.assertEqual(action["price"], "1.00")
+        self.assertEqual(action["estimated_max_loss"], 100.0)
+        self.assertIn("auto_option_buy_planned", [item["kind"] for item in result.events])
+
+    def test_option_sell_to_close_action_shape(self) -> None:
+        action = agentic_monitor.review_and_place_option_sell_to_close(
+            {
+                "symbol": "AMD",
+                "chain_symbol": "AMD",
+                "option_id": "option-1",
+                "quantity": 1,
+                "option_type": "call",
+            },
+            1.55,
+            self.config,
+        )
+
+        self.assertEqual(action["type"], "review_and_place_option_sell_to_close")
+        self.assertEqual(action["legs"][0]["side"], "sell")
+        self.assertEqual(action["legs"][0]["position_effect"], "close")
+        self.assertEqual(action["price"], "1.55")
+
+    def test_cancel_option_order_action_shape(self) -> None:
+        action = agentic_monitor.cancel_option_order_action("order-1", "AMD")
+
+        self.assertEqual(action["type"], "cancel_option_order")
+        self.assertEqual(action["asset_type"], "option")
+        self.assertEqual(action["order_id"], "order-1")
+
+    def test_option_profit_target_plans_sell_to_close(self) -> None:
+        state = deepcopy(self.state)
+        state["option_positions"] = [base_option_position()]
+        account = base_account()
+        account["option_level"] = "option_level_2"
+        account["option_positions"] = [base_option_position()]
+
+        result = self.run_monitor(
+            state=state,
+            account=account,
+            quotes={
+                "AMD": {"price": 101.0},
+                "option-1": {"price": 1.55},
+                "SPY": {"price": 600.0},
+                "VIX": {"price": 16.0},
+            },
+            mode="position",
+        )
+
+        self.assertEqual(len(result.actions), 1)
+        self.assertEqual(result.actions[0]["type"], "review_and_place_option_sell_to_close")
+        self.assertEqual(result.actions[0]["exit_reason"], "profit_target")
+        self.assertEqual(result.actions[0]["price"], "1.55")
+        self.assertIn("option_exit_planned", [item["kind"] for item in result.events])
+
+    def test_option_stop_loss_plans_sell_to_close(self) -> None:
+        state = deepcopy(self.state)
+        state["option_positions"] = [base_option_position()]
+        account = base_account()
+        account["option_level"] = "option_level_2"
+        account["option_positions"] = [base_option_position()]
+
+        result = self.run_monitor(
+            state=state,
+            account=account,
+            quotes={
+                "AMD": {"price": 101.0},
+                "option-1": {"price": 0.64},
+                "SPY": {"price": 600.0},
+                "VIX": {"price": 16.0},
+            },
+            mode="position",
+        )
+
+        self.assertEqual(result.actions[0]["exit_reason"], "stop_loss")
+
+    def test_option_time_stop_plans_sell_to_close(self) -> None:
+        position = base_option_position()
+        position["expiration_date"] = "2026-06-30"
+        state = deepcopy(self.state)
+        state["option_positions"] = [position]
+        account = base_account()
+        account["option_level"] = "option_level_2"
+        account["option_positions"] = [position]
+
+        result = self.run_monitor(
+            state=state,
+            account=account,
+            quotes={
+                "AMD": {"price": 101.0},
+                "option-1": {"price": 1.01},
+                "SPY": {"price": 600.0},
+                "VIX": {"price": 16.0},
+            },
+            mode="position",
+        )
+
+        self.assertEqual(result.actions[0]["exit_reason"], "time_stop")
+
+    def test_option_underlying_stop_plans_sell_to_close(self) -> None:
+        state = deepcopy(self.state)
+        state["option_positions"] = [base_option_position()]
+        account = base_account()
+        account["option_level"] = "option_level_2"
+        account["option_positions"] = [base_option_position()]
+
+        result = self.run_monitor(
+            state=state,
+            account=account,
+            quotes={
+                "AMD": {"price": 91.5},
+                "option-1": {"price": 1.01},
+                "SPY": {"price": 600.0},
+                "VIX": {"price": 16.0},
+            },
+            mode="position",
+        )
+
+        self.assertEqual(result.actions[0]["exit_reason"], "underlying_stop")
+
+    def test_option_exit_skips_missing_quote(self) -> None:
+        state = deepcopy(self.state)
+        state["option_positions"] = [base_option_position()]
+        account = base_account()
+        account["option_level"] = "option_level_2"
+        account["option_positions"] = [base_option_position()]
+
+        result = self.run_monitor(
+            state=state,
+            account=account,
+            quotes={"AMD": {"price": 101.0}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
+            mode="position",
+        )
+
+        self.assertEqual(result.actions, [])
+        self.assertIn("option_quote_missing", [item["kind"] for item in result.events])
+
+    def test_option_exit_skips_duplicate_close_order(self) -> None:
+        state = deepcopy(self.state)
+        state["option_positions"] = [base_option_position()]
+        account = base_account()
+        account["option_level"] = "option_level_2"
+        account["option_positions"] = [base_option_position()]
+
+        result = self.run_monitor(
+            state=state,
+            account=account,
+            orders=[
+                {
+                    "asset_type": "option",
+                    "option_id": "option-1",
+                    "side": "sell",
+                    "position_effect": "close",
+                    "state": "confirmed",
+                }
+            ],
+            quotes={
+                "AMD": {"price": 101.0},
+                "option-1": {"price": 1.55},
+                "SPY": {"price": 600.0},
+                "VIX": {"price": 16.0},
+            },
+            mode="position",
+        )
+
+        self.assertEqual(result.actions, [])
+        self.assertIn("option_close_order_exists", [item["kind"] for item in result.events])
+
+    def test_option_exit_blocks_without_account_approval(self) -> None:
+        state = deepcopy(self.state)
+        state["option_positions"] = [base_option_position()]
+        account = base_account()
+        account["option_level"] = ""
+        account["option_positions"] = [base_option_position()]
+
+        result = self.run_monitor(
+            state=state,
+            account=account,
+            quotes={
+                "AMD": {"price": 101.0},
+                "option-1": {"price": 1.55},
+                "SPY": {"price": 600.0},
+                "VIX": {"price": 16.0},
+            },
+            mode="position",
+        )
+
+        self.assertEqual(result.actions, [])
+        self.assertIn("option_exit_not_approved", [item["kind"] for item in result.events])
+
     def test_buy_fill_arms_stop_and_synthetic_target(self) -> None:
         events, actions = agentic_monitor.handle_buy_fill(
             self.state,
@@ -113,6 +365,9 @@ class AgenticMonitorTests(unittest.TestCase):
         self.assertAlmostEqual(self.state["position"]["partial_target_price"], 108.0)
         self.assertEqual(events[0]["kind"], "buy_filled")
         self.assertEqual(actions[0]["type"], "place_protective_stop")
+        self.assertEqual(actions[0]["quantity_scope"], "full_position")
+        self.assertTrue(actions[0]["consolidate_by_symbol"])
+        self.assertTrue(actions[0]["cancel_existing_symbol_stops_first"])
         self.assertEqual(actions[1]["type"], "arm_synthetic_profit_target")
 
     def test_target_reached_with_high_vix_plans_full_profit_sell_and_elevated_poll(self) -> None:
@@ -281,7 +536,7 @@ class AgenticMonitorTests(unittest.TestCase):
         self.assertEqual(result.state["paused_reason"], "manual_activity_detected")
         self.assertEqual(result.actions, [])
 
-    def test_group_cap_blocks_second_position_in_same_sector(self) -> None:
+    def test_same_sector_candidate_allowed_when_group_cap_disabled(self) -> None:
         position = {
             "symbol": "NVDA",
             "quantity": 1,
@@ -295,8 +550,45 @@ class AgenticMonitorTests(unittest.TestCase):
             candidates=[base_candidate("AMD")],
         )
 
+        self.assertEqual(len(result.actions), 1)
+        self.assertEqual(result.actions[0]["symbol"], "AMD")
+        self.assertNotIn("candidate_group_cap", [item["kind"] for item in result.events])
+
+    def test_held_symbol_add_on_allowed_when_max_positions_reached(self) -> None:
+        account = base_account()
+        account["positions"] = [
+            {"symbol": "DAL", "quantity": 8, "entry_price": 86.24, "stop_price": 87.28},
+            {"symbol": "WFC", "quantity": 15, "entry_price": 84.34, "stop_price": 77.63},
+        ]
+        candidate = base_candidate("DAL")
+        candidate["sector_group"] = "airlines"
+        candidate["max_loss"] = 10.0
+
+        result = self.run_monitor(
+            account=account,
+            quotes={"DAL": {"price": 101.0}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
+            candidates=[candidate],
+        )
+
+        self.assertEqual(len(result.actions), 1)
+        self.assertEqual(result.actions[0]["symbol"], "DAL")
+        self.assertNotIn("candidate_already_held", [item["kind"] for item in result.events])
+
+    def test_new_symbol_still_blocked_when_max_positions_reached(self) -> None:
+        account = base_account()
+        account["positions"] = [
+            {"symbol": "DAL", "quantity": 8, "entry_price": 86.24, "stop_price": 87.28},
+            {"symbol": "WFC", "quantity": 15, "entry_price": 84.34, "stop_price": 77.63},
+        ]
+
+        result = self.run_monitor(
+            account=account,
+            quotes={"AMD": {"price": 101.0}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
+            candidates=[base_candidate("AMD")],
+        )
+
         self.assertEqual(result.actions, [])
-        self.assertIn("candidate_group_cap", [item["kind"] for item in result.events])
+        self.assertIn("max_positions_reached", [item["kind"] for item in result.events])
 
     def test_total_open_risk_cap_blocks_candidate(self) -> None:
         position = {
@@ -317,6 +609,54 @@ class AgenticMonitorTests(unittest.TestCase):
 
         self.assertEqual(result.actions, [])
         self.assertIn("candidate_open_risk_skip", [item["kind"] for item in result.events])
+
+    def test_queued_buy_order_creates_monitor_task_without_stop_action(self) -> None:
+        state = deepcopy(self.state)
+        queued_order = {
+            "id": "order-rtx",
+            "symbol": "RTX",
+            "side": "buy",
+            "type": "limit",
+            "state": "queued",
+            "quantity": 3,
+            "price": 198.2,
+            "cumulative_quantity": 0,
+        }
+
+        result = self.run_monitor(
+            state=state,
+            account=base_account(),
+            orders=[queued_order],
+            quotes={"RTX": {"price": 198.2}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
+            mode="position",
+        )
+
+        tasks = result.state["agentic_tasks"]
+        queued_tasks = [item for item in tasks if item["type"] == "queued_buy_monitor"]
+        self.assertEqual(len(queued_tasks), 1)
+        self.assertEqual(queued_tasks[0]["symbol"], "RTX")
+        self.assertEqual(result.actions, [])
+
+    def test_missing_protective_stop_creates_critical_task(self) -> None:
+        position = {
+            "symbol": "AMD",
+            "quantity": 10,
+            "entry_price": 100.0,
+            "stop_price": 92.0,
+        }
+
+        result = self.run_monitor(
+            account=base_account(position),
+            orders=[],
+            quotes={"AMD": {"price": 101.0}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
+            mode="position",
+        )
+
+        stop_tasks = [item for item in result.state["agentic_tasks"] if item["type"] == "protective_stop_check"]
+        self.assertEqual(len(stop_tasks), 1)
+        self.assertEqual(stop_tasks[0]["status"], "risk")
+        self.assertEqual(stop_tasks[0]["priority"], "critical")
+        self.assertIn("protective_stop_task_risk", [item["kind"] for item in result.events])
 
 
 if __name__ == "__main__":

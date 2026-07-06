@@ -24,7 +24,7 @@ Market-risk indicators:
 Rules:
 
 - Long-only equities and ETFs.
-- No options, crypto, futures, margin, short selling, or leveraged ETFs in v1.
+- Long calls/puts may be used only after the Agentic account has option level 2 or 3 approval; no crypto, futures, margin, short selling, leveraged ETFs, spreads, covered calls, cash-secured puts, or naked options in v1.
 - `VIX` is an informational volatility indicator only, not a buy candidate.
 - Regular-hours trading only.
 - Current automation schedule is regular-market-hours-only. After-close scans create pending candidates only if a separate after-close automation is enabled later.
@@ -95,6 +95,7 @@ Before any Robinhood order review:
 - Pending candidate: first morning validation event at 7:00 AM PT / 10:00 AM ET if actionable.
 - Open position: silent checks every hour during regular market hours.
 - Active order, first 30 minutes after entry, or within 1% of stop/target: keep the hourly market-hours heartbeat and notify only on meaningful state changes.
+- Long option exits are automated with sell-to-close review/place actions when premium reaches +50%, premium falls -35%, DTE is 14 or fewer, or the underlying breaks the stored stop.
 - Daily after-close brief: only when separately scheduled.
 - Polls stay quiet unless a meaningful event occurs.
 

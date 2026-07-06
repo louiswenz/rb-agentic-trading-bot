@@ -64,7 +64,7 @@ class SwingStrategyNewsTests(unittest.TestCase):
         assert candidate is not None
         self.assertEqual(candidate.news_score, 0.0)
         self.assertEqual(candidate.news_summary, "no material recent news found")
-        self.assertAlmostEqual(candidate.combined_rank_score, candidate.relative_strength_pct)
+        self.assertGreater(candidate.combined_rank_score, candidate.relative_strength_pct)
 
     def test_positive_news_boosts_combined_rank(self) -> None:
         candidate = swing_strategy.scan_symbol(
@@ -82,7 +82,7 @@ class SwingStrategyNewsTests(unittest.TestCase):
         self.assertEqual(candidate.news_score, 2.0)
         self.assertGreater(candidate.combined_rank_score, candidate.relative_strength_pct)
         self.assertIn("analyst upgrade", candidate.reason)
-        self.assertAlmostEqual(candidate.reward_risk_ratio, 1.5)
+        self.assertAlmostEqual(candidate.reward_risk_ratio, 2.0)
         self.assertAlmostEqual(candidate.max_entry, candidate.entry * 1.005)
 
     def test_blocking_news_rejects_candidate(self) -> None:

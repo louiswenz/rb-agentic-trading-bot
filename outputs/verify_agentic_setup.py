@@ -44,6 +44,7 @@ def main() -> int:
 
     required_files = [
         OUTPUTS / "agentic_monitor.py",
+        OUTPUTS / "agentic_task_queue.py",
         OUTPUTS / "swing_strategy.py",
         OUTPUTS / "live_trading_bot.py",
         OUTPUTS / "broker_adapters.py",
@@ -57,6 +58,7 @@ def main() -> int:
     ]
 
     prompt = str(live_auto.get("prompt", ""))
+    local_orchestrator_prompt = (OUTPUTS / "codex_live_orchestrator_prompt.md").read_text(encoding="utf-8")
     live_rrule = str(live_auto["rrule"])
     morning_prompt = str(morning_auto.get("prompt", ""))
     morning_rrule = str(morning_auto["rrule"])
@@ -79,9 +81,16 @@ def main() -> int:
         "get_equity_historicals",
         "get_equity_tradability",
         "get_option_positions",
+        "get_option_orders",
+        "get_option_chains",
+        "get_option_instruments",
+        "get_option_quotes",
         "review_equity_order",
         "place_equity_order",
         "cancel_equity_order",
+        "review_option_order",
+        "place_option_order",
+        "cancel_option_order",
     ]
 
     checks = [
@@ -116,14 +125,61 @@ def main() -> int:
             str(config["risk"].get("total_open_risk_pct")),
         ),
         check(
-            "sector_concentration_enabled",
-            config["strategy"].get("sector_concentration", {}).get("enabled") is True,
+            "sector_concentration_disabled",
+            config["strategy"].get("sector_concentration", {}).get("enabled") is False,
             str(config["strategy"].get("sector_concentration", {}).get("enabled")),
+        ),
+        check(
+            "add_to_existing_positions_enabled",
+            config["strategy"].get("allow_add_to_existing_positions") is True,
+            str(config["strategy"].get("allow_add_to_existing_positions")),
+        ),
+        check(
+            "long_options_enabled",
+            config["execution"].get("allow_options") is True
+            and config.get("options_strategy", {}).get("enabled") is True
+            and config.get("options_strategy", {}).get("strategies") == ["long_call", "long_put"],
+            str(config.get("options_strategy")),
+        ),
+        check(
+            "automated_option_exits_enabled",
+            config.get("options_exit", {}).get("enabled") is True
+            and config.get("options_exit", {}).get("profit_target_pct") == 50.0
+            and config.get("options_exit", {}).get("stop_loss_pct") == 35.0
+            and config.get("options_exit", {}).get("min_dte_exit") == 14,
+            str(config.get("options_exit")),
+        ),
+        check(
+            "option_account_approval_gate",
+            str(verified_account.get("option_level", "")) in config.get("options_strategy", {}).get(
+                "require_account_option_level", []
+            )
+            or bool(config.get("options_strategy", {}).get("block_live_trading_without_approval", False)),
+            str(verified_account.get("option_level", "")),
         ),
         check(
             "earnings_blackout_days",
             config["strategy"].get("earnings_blackout_days") == 5,
             str(config["strategy"].get("earnings_blackout_days")),
+        ),
+        check(
+            "pullback_in_uptrend_enabled",
+            config["strategy"].get("pullback_in_uptrend", {}).get("enabled") is True
+            and float(config["strategy"].get("pullback_in_uptrend", {}).get("min_volume_ratio", 0)) > 0,
+            str(config["strategy"].get("pullback_in_uptrend")),
+        ),
+        check(
+            "sector_relative_momentum_enabled",
+            config["strategy"].get("sector_relative_momentum", {}).get("enabled") is True
+            and bool(config["strategy"].get("sector_relative_momentum", {}).get("group_proxy_symbols")),
+            str(config["strategy"].get("sector_relative_momentum")),
+        ),
+        check(
+            "non_momentum_setups_enabled",
+            config["strategy"].get("sector_relative_pullback", {}).get("enabled") is True
+            and config["strategy"].get("quality_range_reversion", {}).get("enabled") is True
+            and bool(config["strategy"].get("setup_rank_weights")),
+            "sector_relative_pullback and quality_range_reversion enabled",
         ),
         check(
             "r_based_profit_targets",
@@ -176,7 +232,8 @@ def main() -> int:
         ),
         check(
             "broker_mcp_verified",
-            state.get("broker_mcp_status") in {"verified", "verified_read_only"},
+            state.get("broker_mcp_status")
+            in {"verified", "verified_read_only", "verified_live_monitor", "verified_order_submitted"},
             str(state.get("broker_mcp_status")),
         ),
         check(
@@ -227,6 +284,15 @@ def main() -> int:
             "live_prompt_requires_news_filter",
             "latest stock-specific news" in prompt and "--news-json" in prompt,
             "news-aware candidate language present",
+        ),
+        check(
+            "live_prompt_requires_task_queue",
+            ("work/agentic_tasks.md" in prompt and "work/agentic_tasks.json" in prompt)
+            or (
+                "work/agentic_tasks.md" in local_orchestrator_prompt
+                and "work/agentic_tasks.json" in local_orchestrator_prompt
+            ),
+            "task queue paths referenced",
         ),
         check(
             "scheduled_candidate_scan_active",

@@ -29,6 +29,30 @@ def test_load_universe_excludes_symbols() -> None:
         assert refresh.load_universe(path) == ["SPY", "XLU"]
 
 
+def test_load_universe_includes_market_risk_indicators_once() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "config.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "strategy": {
+                        "trade_universe": ["SPY", "QQQ"],
+                        "market_risk_indicators": ["VIX", "SPY"],
+                        "excluded_symbols": [],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        assert refresh.load_universe(path) == ["SPY", "QQQ", "VIX"]
+
+
+def test_yahoo_symbol_maps_vix_index() -> None:
+    assert refresh.yahoo_symbol("VIX") == "^VIX"
+    assert refresh.yahoo_symbol("AMD") == "AMD"
+
+
 def test_rows_from_yahoo_chart_skips_empty_bars() -> None:
     payload = {
         "chart": {

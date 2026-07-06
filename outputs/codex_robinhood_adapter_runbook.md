@@ -2,6 +2,11 @@
 
 This runbook defines the live adapter layer for the Agentic trading strategy. The local Python scripts produce state, events, and action requests. Codex automations call Robinhood tools, feed snapshots into `agentic_monitor.py`, execute returned actions, save state, and notify the user.
 
+The monitor also derives an operational task queue from broker snapshots and local state. Persist it after every meaningful monitor run:
+
+- Machine-readable queue: `work/agentic_tasks.json`
+- Human-readable queue: `work/agentic_tasks.md`
+
 ## Standing Authorization
 
 Live automation is authorized only within these hard caps:
@@ -13,13 +18,13 @@ Live automation is authorized only within these hard caps:
 - Max 4% planned risk per trade.
 - Max 6% planned risk across all open positions.
 - Minimum 1.5R reward/risk for new buys.
-- One position per sector/group under $5,000; do not open a second airline/travel-equivalent trade while one is already held.
+- Sector/group concentration is disabled; same-symbol add-ons are allowed when all risk caps pass.
 - Earnings blackout blocks new buys when supplied news data shows earnings within 5 trading days.
 - Pause new buys at 5% daily drawdown from start-of-day equity.
 - Limit buy orders only.
 - Stop-market GTC protective sell after every buy fill.
 - R-based synthetic profit target only unless native linked OCO/bracket support is available; default partial target is 1R and default full target is 1.5R.
-- No options, crypto, futures, margin, shorts, market buys, leveraged ETFs, or unsettled-cash reuse.
+- Long call/put options are allowed only after the Agentic account reports `option_level_2` or `option_level_3`; no crypto, futures, margin, shorts, market buys, leveraged ETFs, unsettled-cash reuse, multi-leg options, covered calls, cash-secured puts, naked shorts, or stock-option combo orders.
 
 ## Tool Mapping
 
@@ -46,6 +51,9 @@ Use read-only Robinhood tools:
 - `get_equity_orders`: open/recent orders.
 - `get_equity_quotes`: live quotes for active positions, pending candidates, `SPY`, `QQQ`, `VIX`, and required risk/context symbols.
 - `get_equity_historicals`: daily regular-hours OHLCV bars for the benchmark and trade-universe symbols.
+- `get_option_positions`: open option positions.
+- `get_option_orders`: open/recent option orders.
+- `get_option_chains`, `get_option_instruments`, `get_option_quotes`: option contract discovery and quote validation for final equity-signal candidates only.
 - Latest stock news snapshot for deterministic prescreen survivors and active holdings with risk events when available from connected tools or approved web/news sources.
 
 Normalize snapshots into:
@@ -99,6 +107,41 @@ Collect or summarize stock-specific news only for the returned `news_collection_
 Use a -3 to +3 sentiment scale. Missing news is neutral by default. Severe adverse news or a configured blocking event must prevent a new buy candidate even when the technical setup passes.
 When available, include `days_until_earnings`, `next_earnings_date`, or `earnings_date`; the scanner blocks new buys inside the configured earnings blackout window.
 
+### Candidate Setup Families
+
+`swing_strategy.py` evaluates setup engines in parallel and emits the highest-ranked valid setup for each symbol:
+
+- `momentum_breakout`: price is breaking above the prior range with required trend, risk, and volume context.
+- `momentum_continuation`: price remains in a valid trend and relative-strength continuation pattern without a fresh range breakout.
+- `pullback_in_uptrend`: price has pulled back into a rising trend, remains near the configured EMA, has acceptable RSI, and meets lower pullback volume confirmation.
+- `sector_relative_pullback`: the sector is holding up versus SPY while the stock has temporarily lagged the sector and is reclaiming support.
+- `quality_range_reversion`: a liquid large-cap or ETF-style symbol has pulled back inside a broad uptrend and shows a bullish reversal near range support.
+
+After setup evaluation, all candidates still pass the shared news, reward/risk, buying-power, position-size, max-loss, and live-price validation layers. When `strategy.sector_relative_momentum.enabled=true`, the scanner loads the configured sector proxy CSVs from `work/agentic_price_history`, applies sector-relative inputs to relevant setup engines, and adds the configured sector-relative score weight to candidate ranking. If a proxy history file is missing, the symbol can still be evaluated by ordinary rules, but no sector-relative setup or rank boost is applied.
+
+### Option Candidate Enrichment
+
+`swing_strategy.py` emits `option_candidate` intent metadata for equity finalists when options are enabled. This is not an order. Before staging an option order candidate, the orchestrator must:
+
+1. Confirm the Agentic account is `agentic_allowed=true` and has `option_level_2` or `option_level_3`; otherwise set option trading blocked and do not call option review/place tools.
+2. Use `get_option_chains` and `get_option_instruments` for the underlying.
+3. Select a single long call or long put contract matching configured DTE, delta, spread, open-interest, and volume constraints.
+4. Use `get_option_quotes` and cap max loss at the full debit premium: `contracts * limit_price * 100`.
+5. Stage an enriched pending candidate with `asset_type="option"`, `option_id`, `option_limit_price`, `contracts`, `option_type`, `option_strategy`, `max_loss`, and the original underlying symbol.
+
+Option orders must be single-leg buy-to-open limit orders, regular-hours, GFD. Exits must be single-leg sell-to-close. No broker-side protective stop is required for long options; automated synthetic monitoring uses option quotes and sell-to-close actions.
+
+### Automated Option Exit Monitoring
+
+For every live monitor run, fetch option positions, option orders, and option quotes for open long-option positions. The monitor emits `review_and_place_option_sell_to_close` when any configured exit condition is met:
+
+- Profit target: option quote is at least 50% above entry premium.
+- Stop loss: option quote is at least 35% below entry premium.
+- Time stop: days to expiration is 14 or fewer.
+- Underlying stop: underlying price is at or below the stored `underlying_stop_price`.
+
+Do not submit a duplicate sell-to-close if an open close order already exists for the same `option_id`. If option quotes are missing or unusable, do not trade and report the data condition. If the Agentic account lacks required option approval, block option exits and notify; continue equity monitoring.
+
 ### Historical Price CSV Phase
 
 For every candidate-generation run, `swing_strategy.py` requires one fresh daily OHLC CSV per configured symbol. Treat `outputs/strategy_config.json:data_freshness.refresh_price_history_before_candidate_scan=true` as a hard pre-scan rule: refresh the full configured universe before scanning so expanded symbols are evaluated instead of skipped for missing or stale `SYMBOL.csv` files.
@@ -139,6 +182,31 @@ Run `agentic_monitor.py` with the normalized snapshots and any pending candidate
 - `daily_brief`: compact after-close summary.
 - `state`: updated local strategy state.
 
+After each non-`--no-save` monitor run, also write:
+
+```bash
+python3 outputs/agentic_monitor.py \
+  --config outputs/strategy_config.json \
+  --state work/agentic_live_adapter_state.json \
+  --account-json ACCOUNT_SNAPSHOT_JSON \
+  --orders-json ORDERS_SNAPSHOT_JSON \
+  --quotes-json QUOTES_SNAPSHOT_JSON \
+  --candidates-json CANDIDATES_JSON \
+  --mode position \
+  --tasks-json work/agentic_tasks.json \
+  --tasks-md work/agentic_tasks.md
+```
+
+The task queue is derived from current account/order/quote snapshots. It is not a separate execution engine. Use it to make queued work explicit:
+
+- `queued_buy_monitor`: open or queued buy orders that need fill/expire/cancel reconciliation. Do not arm a protective stop until a buy has a confirmed fill.
+- `protective_stop_check`: every stock position must have exactly one broker-side protective stop for the full current position quantity.
+- `profit_target_check`: watch synthetic target and partial/full exit conditions.
+- `stop_ratchet_check`: evaluate whether a stop can be raised; never lower an existing stop.
+- `option_exit_check`: monitor long-option profit target, stop loss, time stop, and underlying stop conditions.
+
+Any task with `status=risk` is a monitor event and should be surfaced under the normal notification policy.
+
 ### Execution Phase
 
 For each action:
@@ -149,10 +217,29 @@ For each action:
   - Use a fresh idempotency `ref_id`.
   - On fill, call `handle_buy_fill` through the monitor flow, then place the protective stop.
 
+- `review_and_place_option_buy_to_open`
+  - Confirm the Agentic account still has required option approval immediately before review.
+  - Call `review_option_order` with one buy/open leg, `type=limit`, `time_in_force=gfd`, and `market_hours=regular_hours`.
+  - Surface all review alerts. If any alert blocks the order, do not place it.
+  - If review passes, call `place_option_order` with the same parameters and a fresh `ref_id`.
+  - Save the option order ID and option position metadata in private state.
+
+- `review_and_place_option_sell_to_close`
+  - Call `review_option_order` with one sell/close leg.
+  - If review passes, call `place_option_order` with a fresh `ref_id`.
+  - Update option position state after fills.
+
+- `cancel_option_order`
+  - Resolve the option order ID through `get_option_orders`.
+  - Call `cancel_option_order` only for open option orders belonging to the Agentic account.
+
 - `place_protective_stop`
+  - If `execution.consolidate_protective_stops_by_symbol=true`, maintain exactly one open broker-side protective stop per equity symbol.
+  - For an add-on fill, resolve all open stop-market sell orders for that symbol, cancel them, then place one replacement GTC stop-market sell for the full current broker position quantity.
+  - Use the proposed stop price unless that would lower an existing stop; when consolidating existing stops, preserve the highest current stop price or the proposed stop price, whichever is higher.
   - Call `review_equity_order` with `side=sell`, `type=stop_market`, `stop_price`, and `time_in_force=gtc`.
   - If accepted, call `place_equity_order`.
-  - Save the stop order ID in private state.
+  - Save the single consolidated stop order ID in private state.
   - If rejected, pause new buys and notify immediately.
 
 - `cancel_or_reduce_protective_stop`
@@ -173,7 +260,8 @@ For each action:
 - `raise_or_replace_protective_stop`
   - Use only when the monitor proposes a higher `new_stop_price`; never lower an existing protective stop.
   - Resolve the current broker-side stop from `protective_stop_order_id` or open stop orders for the symbol.
-  - Call `cancel_equity_order` for the old stop, then call `review_equity_order` and `place_equity_order` for a new GTC stop-market sell at `new_stop_price`.
+  - If more than one stop exists for the symbol, cancel all symbol stops and replace them with one full-position stop.
+  - Call `cancel_equity_order` for the old stop or stops, then call `review_equity_order` and `place_equity_order` for a new GTC stop-market sell at `new_stop_price`.
   - Keep the new stop at least the configured minimum distance below current price and require the configured minimum raise over the old stop.
   - If cancel or replacement fails, pause new buys, keep monitoring the exposed position, and notify immediately.
 

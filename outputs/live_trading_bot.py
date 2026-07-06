@@ -29,6 +29,11 @@ def watched_symbols(state: dict[str, Any], candidates: list[dict[str, Any]], con
     symbols = [config["strategy"]["benchmark_symbol"], "VIX"]
     if state.get("position"):
         symbols.append(state["position"]["symbol"])
+    for position in state.get("option_positions", []) or []:
+        if position.get("option_id"):
+            symbols.append(position["option_id"])
+        if position.get("symbol"):
+            symbols.append(position["symbol"])
     symbols.extend(candidate["symbol"] for candidate in candidates)
     return sorted(set(symbols))
 
@@ -37,6 +42,8 @@ def choose_mode(state: dict[str, Any], candidates: list[dict[str, Any]], request
     if requested != "auto":
         return requested
     if state.get("position"):
+        return "position"
+    if state.get("option_positions"):
         return "position"
     if candidates:
         return "pending"
