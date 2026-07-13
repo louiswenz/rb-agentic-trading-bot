@@ -29,6 +29,29 @@ def check(name: str, passed: bool, detail: str) -> dict:
     return {"name": name, "passed": bool(passed), "detail": detail}
 
 
+def verified_snapshot_summary(snapshot: dict) -> str:
+    account = snapshot.get("account", snapshot)
+    positions = snapshot.get("positions", account.get("positions", []))
+    orders = snapshot.get("orders", [])
+    option_positions = snapshot.get("option_positions", account.get("option_positions", []))
+    option_orders = snapshot.get("option_orders", [])
+    summary = {
+        "account_value": account.get("account_value"),
+        "buying_power": account.get("buying_power"),
+        "equity": account.get("equity"),
+        "agentic_allowed": account.get("agentic_allowed"),
+        "option_level": account.get("option_level"),
+        "positions_count": len(positions) if isinstance(positions, list) else None,
+        "orders_count": len(orders) if isinstance(orders, list) else None,
+        "option_positions_count": len(option_positions) if isinstance(option_positions, list) else None,
+        "option_orders_count": len(option_orders) if isinstance(option_orders, list) else None,
+        "snapshot_time": snapshot.get("time"),
+        "snapshot_mode": snapshot.get("mode"),
+        "read_only": snapshot.get("read_only"),
+    }
+    return json.dumps(summary, sort_keys=True)
+
+
 def main() -> int:
     config_path = OUTPUTS / "strategy_config.json"
     state_path = WORK / "agentic_live_adapter_state.json"
@@ -121,8 +144,23 @@ def main() -> int:
         ),
         check(
             "total_open_risk_cap",
-            config["risk"].get("total_open_risk_pct") == 6.0,
+            config["risk"].get("total_open_risk_pct") == 5.0,
             str(config["risk"].get("total_open_risk_pct")),
+        ),
+        check(
+            "risk_per_trade_cap",
+            config["risk"].get("risk_per_trade_pct") == 2.0,
+            str(config["risk"].get("risk_per_trade_pct")),
+        ),
+        check(
+            "max_position_cap",
+            config["risk"].get("max_position_pct") == 35.0,
+            str(config["risk"].get("max_position_pct")),
+        ),
+        check(
+            "minimum_cash_reserve",
+            config["risk"].get("min_cash_reserve_pct") == 15.0,
+            str(config["risk"].get("min_cash_reserve_pct")),
         ),
         check(
             "sector_concentration_disabled",
@@ -159,8 +197,13 @@ def main() -> int:
         ),
         check(
             "earnings_blackout_days",
-            config["strategy"].get("earnings_blackout_days") == 5,
+            config["strategy"].get("earnings_blackout_days") == 2,
             str(config["strategy"].get("earnings_blackout_days")),
+        ),
+        check(
+            "minimum_stock_dollar_volume",
+            config["strategy"].get("min_average_dollar_volume") == 100_000_000.0,
+            str(config["strategy"].get("min_average_dollar_volume")),
         ),
         check(
             "pullback_in_uptrend_enabled",
@@ -232,8 +275,7 @@ def main() -> int:
         ),
         check(
             "broker_mcp_verified",
-            state.get("broker_mcp_status")
-            in {"verified", "verified_read_only", "verified_live_monitor", "verified_order_submitted"},
+            str(state.get("broker_mcp_status", "")).startswith("verified"),
             str(state.get("broker_mcp_status")),
         ),
         check(
@@ -244,7 +286,7 @@ def main() -> int:
                 and isinstance(verified_snapshot.get("positions"), list)
                 and isinstance(verified_snapshot.get("orders"), list)
             ),
-            str(verified_snapshot),
+            verified_snapshot_summary(verified_snapshot),
         ),
         check(
             "robinhood_mcp_enabled",

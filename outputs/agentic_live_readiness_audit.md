@@ -25,11 +25,15 @@ Date: 2026-06-20
 - Normal open-position monitoring: 3600 seconds.
 - Elevated monitoring: 3600 seconds.
 - Minimum new-buy reward/risk: 1.5R.
-- Total open-risk cap: 6% of account value.
+- Per-trade risk cap: 2% of account value.
+- Maximum single-symbol exposure: 35% of account value.
+- Total open-risk cap: 5% of account value.
+- Minimum cash reserve after a new buy: 15% of account value.
 - Sector/group concentration cap is disabled.
 - Long option support is approval-gated; live option trading remains blocked unless the Agentic account reports option level 2 or 3.
 - Long option exits are automated with premium target, premium stop, DTE time stop, and underlying-stop triggers.
-- Earnings blackout is enabled when earnings timing is supplied.
+- Earnings blackout is enabled 2 trading days before earnings when earnings timing is supplied.
+- New stock candidates require at least $100M average dollar volume.
 - Protective broker-side stop required after buy fill.
 - R-based synthetic profit target tracked by monitor.
 - Profit-target sells do not count against the daily new-buy cap.
