@@ -79,7 +79,29 @@ class SetupSignal:
     max_gap_pct: float | None = None
 
 
-ETF_SYMBOLS = {"SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "XLV"}
+ETF_SYMBOLS = {
+    "SPY",
+    "QQQ",
+    "IWM",
+    "DIA",
+    "XLK",
+    "XLF",
+    "XLE",
+    "XLV",
+    "SMH",
+    "XRT",
+    "GLD",
+    "TLT",
+    "HYG",
+    "ARKK",
+    "XLI",
+    "XLY",
+    "XLP",
+    "XLU",
+    "XLRE",
+    "XLC",
+    "XLB",
+}
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -582,6 +604,8 @@ def position_size(
     risk_per_trade_pct: float,
     max_position_pct: float,
     max_trade_risk_dollars: float | None = None,
+    existing_position_value: float = 0.0,
+    min_cash_reserve_pct: float = 0.0,
 ) -> tuple[int, float, float]:
     risk_per_share = max(entry - stop, 0.0)
     if risk_per_share <= 0:
@@ -591,8 +615,11 @@ def position_size(
     if max_trade_risk_dollars is not None:
         max_risk_dollars = min(max_risk_dollars, max_trade_risk_dollars)
     risk_sized_shares = math.floor(max_risk_dollars / risk_per_share)
-    cap_sized_shares = math.floor((account_value * (max_position_pct / 100.0)) / entry)
-    cash_sized_shares = math.floor(settled_cash / entry)
+    remaining_position_cap = max(0.0, (account_value * (max_position_pct / 100.0)) - existing_position_value)
+    cap_sized_shares = math.floor(remaining_position_cap / entry)
+    required_cash_reserve = account_value * (min_cash_reserve_pct / 100.0)
+    cash_available_for_trade = max(0.0, settled_cash - required_cash_reserve)
+    cash_sized_shares = math.floor(cash_available_for_trade / entry)
     shares = max(0, min(risk_sized_shares, cap_sized_shares, cash_sized_shares))
     position_value = shares * entry
     max_loss = shares * risk_per_share
@@ -615,6 +642,77 @@ def load_news_snapshot(path_or_json: str | None) -> dict[str, Any]:
         with path.open("r", encoding="utf-8") as handle:
             return json.load(handle)
     return json.loads(path_or_json)
+
+
+def load_optional_json(path_or_json: str | None, default: Any) -> Any:
+    if not path_or_json:
+        return default
+    path = Path(path_or_json)
+    if path.exists():
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    return json.loads(path_or_json)
+
+
+def normalize_broker_positions(snapshot: Any) -> dict[str, dict[str, Any]]:
+    if isinstance(snapshot, dict):
+        if isinstance(snapshot.get("positions"), list):
+            positions = snapshot["positions"]
+        elif isinstance(snapshot.get("data"), dict) and isinstance(snapshot["data"].get("positions"), list):
+            positions = snapshot["data"]["positions"]
+        else:
+            positions = []
+    elif isinstance(snapshot, list):
+        positions = snapshot
+    else:
+        positions = []
+    return {
+        str(position.get("symbol", "")).upper(): position
+        for position in positions
+        if position.get("symbol") and float(position.get("quantity", 0) or 0) > 0
+    }
+
+
+def normalize_broker_orders(snapshot: Any) -> list[dict[str, Any]]:
+    if isinstance(snapshot, dict):
+        if isinstance(snapshot.get("orders"), list):
+            return snapshot["orders"]
+        if isinstance(snapshot.get("data"), dict) and isinstance(snapshot["data"].get("orders"), list):
+            return snapshot["data"]["orders"]
+    if isinstance(snapshot, list):
+        return snapshot
+    return []
+
+
+def open_stop_order_for_symbol(orders: list[dict[str, Any]], symbol: str) -> dict[str, Any] | None:
+    symbol = symbol.upper()
+    stops = [
+        order
+        for order in orders
+        if str(order.get("symbol", "")).upper() == symbol
+        and order.get("side") == "sell"
+        and order.get("trigger") == "stop"
+        and order.get("state") in {"open", "queued", "confirmed"}
+    ]
+    if not stops:
+        return None
+    return max(stops, key=lambda order: float(order.get("stop_price", 0) or 0))
+
+
+def broker_position_quantity(position: dict[str, Any] | None) -> float:
+    if not position:
+        return 0.0
+    return float(position.get("quantity", 0.0) or 0.0)
+
+
+def broker_position_average_price(position: dict[str, Any] | None, fallback: float) -> float:
+    if not position:
+        return fallback
+    for key in ("average_buy_price", "entry_price", "average_price"):
+        value = position.get(key)
+        if value not in (None, ""):
+            return float(value)
+    return fallback
 
 
 def parse_symbol_set(value: str | None) -> set[str]:
@@ -776,6 +874,8 @@ def scan_symbol(
     max_trade_risk_dollars: float | None = None,
     apply_news_filter: bool = True,
     sector_bars_by_symbol: dict[str, list[Bar]] | None = None,
+    broker_position: dict[str, Any] | None = None,
+    broker_stop_order: dict[str, Any] | None = None,
 ) -> Candidate | None:
     strategy = config["strategy"]
     risk = config["risk"]
@@ -790,6 +890,8 @@ def scan_symbol(
     spy_closes = [bar.close for bar in spy_bars]
     latest = bars[-1]
     prior = bars[-2]
+    existing_quantity = broker_position_quantity(broker_position)
+    existing_position_value = existing_quantity * latest.close
 
     excluded_symbols = {str(item).upper() for item in strategy.get("excluded_symbols", [])}
     if symbol.upper() in excluded_symbols:
@@ -810,7 +912,21 @@ def scan_symbol(
     relative_strength = stock_return - spy_return
 
     latest_volume_ratio = volume_ratio(bars, int(strategy.get("volume_confirmation", {}).get("lookback_days", 20)))
+    min_dollar_volume = float(strategy.get("min_average_dollar_volume", 0.0) or 0.0)
+    if min_dollar_volume > 0 and symbol.upper() not in ETF_SYMBOLS:
+        volumes = [bar.volume or 0.0 for bar in bars]
+        avg_volume = average(volumes, int(strategy.get("volume_confirmation", {}).get("lookback_days", 20)))
+        if not avg_volume or avg_volume * latest.close < min_dollar_volume:
+            return None
     sector_rs, sector_momentum = sector_relative_metrics(symbol, bars, sector_bars_by_symbol or {}, config)
+
+    if existing_quantity > 0:
+        add_on_config = strategy.get("add_on_controls", {})
+        ema_days = int(add_on_config.get("no_chase_ema_days", 20))
+        moving_average = ema(closes, ema_days) or sma(closes, ema_days)
+        max_distance = float(add_on_config.get("max_distance_above_ema_pct", 3.0))
+        if moving_average and latest.close > moving_average * (1.0 + max_distance / 100.0):
+            return None
 
     same_day_move = percent_change(latest.close, prior.close)
     if same_day_move > float(strategy["same_day_chase_limit_pct"]):
@@ -869,9 +985,22 @@ def scan_symbol(
         risk_per_trade_pct=float(risk["risk_per_trade_pct"]),
         max_position_pct=float(risk["max_position_pct"]),
         max_trade_risk_dollars=max_trade_risk_dollars,
+        existing_position_value=existing_position_value,
+        min_cash_reserve_pct=float(risk.get("min_cash_reserve_pct", 0.0)),
     )
     if shares < 1:
         return None
+
+    if existing_quantity > 0:
+        add_on_config = strategy.get("add_on_controls", {})
+        average_price = broker_position_average_price(broker_position, latest.close)
+        existing_stop = float((broker_stop_order or {}).get("stop_price", 0.0) or broker_position.get("stop_price", 0.0) or 0.0)
+        existing_risk = max(0.0, average_price - existing_stop) * existing_quantity if existing_stop > 0 else 0.0
+        aggregate_symbol_risk = existing_risk + max_loss
+        max_add_on_risk = account_value * (float(add_on_config.get("max_aggregate_symbol_risk_pct", 2.0)) / 100.0)
+        breakeven_protected = existing_stop >= average_price if existing_stop > 0 else False
+        if not breakeven_protected and aggregate_symbol_risk > max_add_on_risk:
+            return None
 
     partial_target = r_multiple_target(latest.close, stop, setup_signal.partial_target_r_multiple)
     profit_target = r_multiple_target(latest.close, stop, setup_signal.target_r_multiple)
@@ -1056,11 +1185,15 @@ def revalidate_candidate(
     settled_cash: float,
     config: dict[str, Any],
     max_trade_risk_dollars: float | None = None,
+    broker_position: dict[str, Any] | None = None,
+    broker_stop_order: dict[str, Any] | None = None,
 ) -> Candidate | None:
     risk = config["risk"]
     if live_price > candidate.max_entry:
         return None
 
+    existing_quantity = broker_position_quantity(broker_position)
+    existing_position_value = existing_quantity * live_price
     shares, position_value, max_loss = position_size(
         account_value=account_value,
         settled_cash=settled_cash,
@@ -1069,9 +1202,21 @@ def revalidate_candidate(
         risk_per_trade_pct=float(risk["risk_per_trade_pct"]),
         max_position_pct=float(risk["max_position_pct"]),
         max_trade_risk_dollars=max_trade_risk_dollars,
+        existing_position_value=existing_position_value,
+        min_cash_reserve_pct=float(risk.get("min_cash_reserve_pct", 0.0)),
     )
     if shares < 1:
         return None
+    if existing_quantity > 0:
+        add_on_config = config["strategy"].get("add_on_controls", {})
+        average_price = broker_position_average_price(broker_position, live_price)
+        existing_stop = float((broker_stop_order or {}).get("stop_price", 0.0) or broker_position.get("stop_price", 0.0) or 0.0)
+        existing_risk = max(0.0, average_price - existing_stop) * existing_quantity if existing_stop > 0 else 0.0
+        aggregate_symbol_risk = existing_risk + max_loss
+        max_add_on_risk = account_value * (float(add_on_config.get("max_aggregate_symbol_risk_pct", 2.0)) / 100.0)
+        breakeven_protected = existing_stop >= average_price if existing_stop > 0 else False
+        if not breakeven_protected and aggregate_symbol_risk > max_add_on_risk:
+            return None
     partial_multiple, target_multiple = setup_exit_multiples(candidate.setup_type, config)
     partial_target = r_multiple_target(live_price, candidate.stop, partial_multiple)
     profit_target = r_multiple_target(live_price, candidate.stop, target_multiple)
@@ -1159,6 +1304,14 @@ def main() -> int:
             "for downstream news collection."
         ),
     )
+    parser.add_argument(
+        "--broker-positions-json",
+        help="Optional broker positions snapshot path or JSON. Used to enforce aggregate held-symbol add-on exposure.",
+    )
+    parser.add_argument(
+        "--broker-orders-json",
+        help="Optional broker orders snapshot path or JSON. Used to find existing protective stops for add-on risk.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     args = parser.parse_args()
 
@@ -1181,6 +1334,9 @@ def main() -> int:
     live_prices = json.loads(args.live_prices) if args.live_prices else {}
     news_snapshot = load_news_snapshot(args.news_json)
     held_symbols = parse_symbol_set(args.held_symbols)
+    broker_positions = normalize_broker_positions(load_optional_json(args.broker_positions_json, []))
+    broker_orders = normalize_broker_orders(load_optional_json(args.broker_orders_json, []))
+    held_symbols.update(broker_positions.keys())
     open_risk_dollars = parse_float_arg(args.open_risk_dollars)
     if strategy.get("news_filter", {}).get("enabled", False):
         output["messages"].append(
@@ -1226,6 +1382,12 @@ def main() -> int:
     output["messages"].append(
         f"Open-risk budget: ${remaining_open_risk:.2f} remaining of ${total_open_risk_cap:.2f} total cap."
     )
+    min_cash_reserve = args.account_value * (float(risk.get("min_cash_reserve_pct", 0.0)) / 100.0)
+    if risk.get("min_cash_reserve_pct") is not None:
+        output["messages"].append(
+            f"Cash reserve gate: keep at least ${min_cash_reserve:.2f} "
+            f"({float(risk.get('min_cash_reserve_pct', 0.0)):g}% of account) after new buys."
+        )
 
     if not market_regime_allows_new_buys(output, prices_dir, config):
         output["status"] = "market_filter_off"
@@ -1281,6 +1443,8 @@ def main() -> int:
             remaining_open_risk,
             apply_news_filter=not args.prescreen_news_symbols_only,
             sector_bars_by_symbol=sector_bars_by_symbol,
+            broker_position=broker_positions.get(symbol.upper()),
+            broker_stop_order=open_stop_order_for_symbol(broker_orders, symbol),
         )
         if candidate:
             candidates.append(candidate)
@@ -1313,6 +1477,8 @@ def main() -> int:
                 args.settled_cash,
                 config,
                 remaining_open_risk,
+                broker_position=broker_positions.get(candidate.symbol.upper()),
+                broker_stop_order=open_stop_order_for_symbol(broker_orders, candidate.symbol),
             )
             if updated:
                 revalidated.append(updated)

@@ -47,6 +47,7 @@ def make_bars(symbol_strength: bool = True) -> tuple[list[swing_strategy.Bar], l
 class SwingStrategyNewsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = load_config()
+        self.config["strategy"]["min_average_dollar_volume"] = 0.0
         self.stock_bars, self.spy_bars = make_bars()
 
     def test_missing_news_is_neutral_candidate_still_allowed(self) -> None:
@@ -136,7 +137,7 @@ class SwingStrategyNewsTests(unittest.TestCase):
             account_value=2000.0,
             settled_cash=2000.0,
             config=self.config,
-            news_snapshot={"AMD": {"sentiment_score": 1.0, "summary": "earnings soon", "days_until_earnings": 3}},
+            news_snapshot={"AMD": {"sentiment_score": 1.0, "summary": "earnings soon", "days_until_earnings": 2}},
         )
 
         self.assertIsNone(candidate)

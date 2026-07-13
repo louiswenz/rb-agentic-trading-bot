@@ -41,12 +41,59 @@ def bars(count: int = 60, start: float = 100.0, volume: float = 1000.0) -> list[
 class SwingStrategySignalTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = load_config()
+        self.config["strategy"]["min_average_dollar_volume"] = 0.0
 
     def test_volume_ratio_uses_prior_average(self) -> None:
         items = bars(count=22, volume=1000)
         items[-1] = scanner.Bar("2026-02-01", 121, 123, 120, 122, 1500)
 
         self.assertEqual(scanner.volume_ratio(items, 20), 1.5)
+
+    def test_add_on_position_size_respects_aggregate_symbol_cap(self) -> None:
+        shares, position_value, max_loss = scanner.position_size(
+            account_value=10000.0,
+            settled_cash=5000.0,
+            entry=200.0,
+            stop=190.0,
+            risk_per_trade_pct=2.0,
+            max_position_pct=35.0,
+            existing_position_value=3300.0,
+            min_cash_reserve_pct=15.0,
+        )
+
+        self.assertEqual(shares, 1)
+        self.assertEqual(position_value, 200.0)
+        self.assertEqual(max_loss, 10.0)
+
+        shares, position_value, max_loss = scanner.position_size(
+            account_value=10000.0,
+            settled_cash=5000.0,
+            entry=200.0,
+            stop=190.0,
+            risk_per_trade_pct=2.0,
+            max_position_pct=35.0,
+            existing_position_value=3500.0,
+            min_cash_reserve_pct=15.0,
+        )
+
+        self.assertEqual((shares, position_value, max_loss), (0, 0.0, 0.0))
+
+    def test_minimum_stock_dollar_volume_filters_illiquid_symbols(self) -> None:
+        config = deepcopy(self.config)
+        config["strategy"]["min_average_dollar_volume"] = 100_000_000.0
+        stock_bars, spy_bars = make_bars()
+
+        candidate = scanner.scan_symbol(
+            "AMD",
+            stock_bars,
+            spy_bars,
+            account_value=5000.0,
+            settled_cash=5000.0,
+            config=config,
+            news_snapshot={},
+        )
+
+        self.assertIsNone(candidate)
 
     def test_atr_stop_can_tighten_legacy_stop(self) -> None:
         items = bars(count=30)

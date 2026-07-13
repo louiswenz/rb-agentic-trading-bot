@@ -35,15 +35,27 @@ def base_account(position: dict | None = None) -> dict:
 def base_candidate(symbol: str = "AMD") -> dict:
     return {
         "symbol": symbol,
-        "shares": 10,
+        "shares": 5,
         "max_next_session_entry": 105.0,
         "entry": 100.0,
         "stop": 92.0,
         "partial_target": 108.0,
         "target_price": 112.0,
-        "max_loss": 80.0,
+        "max_loss": 40.0,
         "reward_risk_ratio": 1.5,
         "sector_group": "semiconductors",
+    }
+
+
+def stop_order(symbol: str = "AMD", quantity: int = 10, stop_price: float = 92.0) -> dict:
+    return {
+        "id": f"stop-{symbol}",
+        "symbol": symbol,
+        "side": "sell",
+        "trigger": "stop",
+        "state": "confirmed",
+        "quantity": quantity,
+        "stop_price": stop_price,
     }
 
 
@@ -116,7 +128,7 @@ class AgenticMonitorTests(unittest.TestCase):
         self.assertEqual(result.actions[0]["symbol"], "AMD")
         self.assertEqual(result.actions[0]["limit_price"], 101.0)
         self.assertEqual(result.actions[0]["reward_risk_ratio"], 1.5)
-        self.assertEqual(result.actions[0]["estimated_max_loss"], 80.0)
+        self.assertEqual(result.actions[0]["estimated_max_loss"], 40.0)
         self.assertTrue(result.actions[0]["after_fill"]["place_protective_stop"])
         self.assertTrue(result.actions[0]["after_fill"]["arm_synthetic_target"])
 
@@ -381,6 +393,7 @@ class AgenticMonitorTests(unittest.TestCase):
 
         result = self.run_monitor(
             account=base_account(position),
+            orders=[stop_order("AMD", 10, 92.0)],
             quotes={
                 "AMD": {"price": 113.0, "trend_score": 0.9},
                 "SPY": {"price": 600.0, "trend_score": 1.0},
@@ -408,6 +421,7 @@ class AgenticMonitorTests(unittest.TestCase):
 
         result = self.run_monitor(
             account=base_account(position),
+            orders=[stop_order("AMD", 10, 92.0)],
             quotes={
                 "AMD": {"price": 101.0, "trend_score": 0.3},
                 "SPY": {"price": 600.0, "trend_score": 1.0},
@@ -546,6 +560,7 @@ class AgenticMonitorTests(unittest.TestCase):
 
         result = self.run_monitor(
             account=base_account(position),
+            orders=[stop_order("NVDA", 1, 92.0)],
             quotes={"AMD": {"price": 101.0}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
             candidates=[base_candidate("AMD")],
         )
@@ -557,8 +572,8 @@ class AgenticMonitorTests(unittest.TestCase):
     def test_held_symbol_add_on_allowed_when_max_positions_reached(self) -> None:
         account = base_account()
         account["positions"] = [
-            {"symbol": "DAL", "quantity": 8, "entry_price": 86.24, "stop_price": 87.28},
-            {"symbol": "WFC", "quantity": 15, "entry_price": 84.34, "stop_price": 77.63},
+            {"symbol": "DAL", "quantity": 1, "entry_price": 86.24, "stop_price": 87.28},
+            {"symbol": "WFC", "quantity": 1, "entry_price": 84.34, "stop_price": 77.63},
         ]
         candidate = base_candidate("DAL")
         candidate["sector_group"] = "airlines"
@@ -566,6 +581,7 @@ class AgenticMonitorTests(unittest.TestCase):
 
         result = self.run_monitor(
             account=account,
+            orders=[stop_order("DAL", 1, 87.28), stop_order("WFC", 1, 77.63)],
             quotes={"DAL": {"price": 101.0}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
             candidates=[candidate],
         )
@@ -577,12 +593,13 @@ class AgenticMonitorTests(unittest.TestCase):
     def test_new_symbol_still_blocked_when_max_positions_reached(self) -> None:
         account = base_account()
         account["positions"] = [
-            {"symbol": "DAL", "quantity": 8, "entry_price": 86.24, "stop_price": 87.28},
-            {"symbol": "WFC", "quantity": 15, "entry_price": 84.34, "stop_price": 77.63},
+            {"symbol": "DAL", "quantity": 1, "entry_price": 86.24, "stop_price": 87.28},
+            {"symbol": "WFC", "quantity": 1, "entry_price": 84.34, "stop_price": 77.63},
         ]
 
         result = self.run_monitor(
             account=account,
+            orders=[stop_order("DAL", 1, 87.28), stop_order("WFC", 1, 77.63)],
             quotes={"AMD": {"price": 101.0}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
             candidates=[base_candidate("AMD")],
         )
@@ -603,6 +620,7 @@ class AgenticMonitorTests(unittest.TestCase):
 
         result = self.run_monitor(
             account=base_account(position),
+            orders=[stop_order("DAL", 8, 76.4)],
             quotes={"BAC": {"price": 101.0}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
             candidates=[candidate],
         )
@@ -656,7 +674,85 @@ class AgenticMonitorTests(unittest.TestCase):
         self.assertEqual(len(stop_tasks), 1)
         self.assertEqual(stop_tasks[0]["status"], "risk")
         self.assertEqual(stop_tasks[0]["priority"], "critical")
+        self.assertEqual(result.state["paused_reason"], "protective_stop_reconciliation_required")
+        self.assertEqual(result.actions[0]["type"], "place_protective_stop")
+        self.assertEqual(result.actions[0]["quantity"], 10)
+        self.assertTrue(result.actions[0]["cancel_existing_symbol_stops_first"])
         self.assertIn("protective_stop_task_risk", [item["kind"] for item in result.events])
+        self.assertIn("protective_stop_repair_required", [item["kind"] for item in result.events])
+
+    def test_missing_stop_without_stop_price_blocks_zero_price_repair(self) -> None:
+        position = {
+            "symbol": "AMD",
+            "quantity": 10,
+            "entry_price": 100.0,
+        }
+
+        result = self.run_monitor(
+            account=base_account(position),
+            orders=[],
+            quotes={"AMD": {"price": 101.0}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
+            mode="position",
+        )
+
+        self.assertEqual(result.state["paused_reason"], "protective_stop_reconciliation_required")
+        self.assertEqual(result.actions[0]["type"], "protective_stop_repair_blocked")
+        self.assertEqual(result.actions[0]["reason"], "missing_stop_price")
+        self.assertNotIn("stop_price", result.actions[0])
+        self.assertIn("protective_stop_repair_blocked", [item["kind"] for item in result.events])
+
+    def test_split_protective_stops_create_consolidation_action(self) -> None:
+        position = {
+            "symbol": "AMD",
+            "quantity": 10,
+            "entry_price": 100.0,
+            "stop_price": 92.0,
+        }
+
+        result = self.run_monitor(
+            account=base_account(position),
+            orders=[stop_order("AMD", 4, 91.0), stop_order("AMD", 6, 92.0)],
+            quotes={"AMD": {"price": 101.0}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
+            mode="position",
+        )
+
+        self.assertEqual(result.actions[0]["type"], "place_protective_stop")
+        self.assertEqual(result.actions[0]["quantity"], 10)
+        self.assertEqual(result.actions[0]["stop_price"], 92.0)
+        self.assertEqual(len(result.actions[0]["cancel_existing_order_ids"]), 2)
+        self.assertIn("protective_stop_repair_required", [item["kind"] for item in result.events])
+
+    def test_broker_positions_refresh_all_local_position_views(self) -> None:
+        state = deepcopy(self.state)
+        stale_position = {
+            "symbol": "AMD",
+            "quantity": 3,
+            "average_buy_price": 100.0,
+            "stop_price": 92.0,
+        }
+        state["positions"] = [stale_position]
+        state["position"] = deepcopy(stale_position)
+        state["active_positions"] = [deepcopy(stale_position)]
+        state["active_position"] = deepcopy(stale_position)
+
+        account_position = {
+            "symbol": "AMD",
+            "quantity": 10,
+            "average_buy_price": 99.0,
+            "stop_price": 92.0,
+        }
+        result = self.run_monitor(
+            state=state,
+            account=base_account(account_position),
+            orders=[stop_order("AMD", 10, 92.0)],
+            quotes={"AMD": {"price": 101.0}, "SPY": {"price": 600.0}, "VIX": {"price": 16.0}},
+            mode="position",
+        )
+
+        self.assertEqual(result.state["positions"][0]["quantity"], 10)
+        self.assertEqual(result.state["position"]["quantity"], 10)
+        self.assertEqual(result.state["active_positions"][0]["quantity"], 10)
+        self.assertEqual(result.state["active_position"]["quantity"], 10)
 
 
 if __name__ == "__main__":

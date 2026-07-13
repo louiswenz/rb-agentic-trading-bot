@@ -151,6 +151,18 @@ def sync_tracked_positions(state: dict[str, Any], account_positions: list[dict[s
 
     state["positions"] = synced
     state["position"] = synced[0] if synced else None
+    state["active_positions"] = deepcopy(synced)
+    state["active_position"] = deepcopy(synced[0]) if synced else None
+
+
+def sync_authorization_scope(state: dict[str, Any], config: dict[str, Any]) -> None:
+    scope = state.setdefault("authorization_scope", {})
+    risk_config = config.get("risk", {})
+    scope["max_planned_risk_pct"] = risk_config.get("risk_per_trade_pct")
+    scope["max_position_pct"] = risk_config.get("max_position_pct")
+    scope["total_open_risk_pct"] = risk_config.get("total_open_risk_pct")
+    scope["max_positions_standard"] = risk_config.get("max_positions_standard")
+    scope["min_cash_reserve_pct"] = risk_config.get("min_cash_reserve_pct")
 
 
 def tracked_positions(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -374,6 +386,14 @@ def position_age_minutes(position: dict[str, Any]) -> float | None:
 
 
 def protective_stop_order_for_symbol(state: dict[str, Any], symbol: str) -> dict[str, Any] | None:
+    stops = protective_stop_orders_for_symbol(state, symbol)
+    if not stops:
+        return None
+    return max(stops, key=lambda order: float(order.get("stop_price", 0) or 0))
+
+
+def protective_stop_orders_for_symbol(state: dict[str, Any], symbol: str) -> list[dict[str, Any]]:
+    stops: list[dict[str, Any]] = []
     for order in state.get("open_orders", []):
         if (
             order.get("symbol") == symbol
@@ -381,8 +401,114 @@ def protective_stop_order_for_symbol(state: dict[str, Any], symbol: str) -> dict
             and order.get("trigger") == "stop"
             and order.get("state") in {"open", "queued", "confirmed"}
         ):
-            return order
+            stops.append(order)
+    return stops
+
+
+def account_position_by_symbol(account: dict[str, Any], symbol: str) -> dict[str, Any] | None:
+    for position in account.get("positions", []) or []:
+        if position.get("symbol") == symbol:
+            return position
     return None
+
+
+def account_position_value(account: dict[str, Any], symbol: str, fallback_price: float) -> float:
+    position = account_position_by_symbol(account, symbol)
+    if not position:
+        return 0.0
+    quantity = float(position.get("quantity", 0) or 0)
+    return quantity * fallback_price
+
+
+def reconcile_protective_stops(
+    state: dict[str, Any],
+    account: dict[str, Any],
+    config: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    events: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = []
+    if not bool(config["execution"].get("auto_place_protective_stop_after_buy_fill", True)):
+        return events, actions
+
+    had_repair = False
+    for position in account.get("positions", []) or []:
+        symbol = position.get("symbol")
+        quantity = int(float(position.get("quantity", 0) or 0))
+        if not symbol or quantity <= 0:
+            continue
+        stops = protective_stop_orders_for_symbol(state, symbol)
+        matching_stops = [order for order in stops if int(float(order.get("quantity", 0) or 0)) == quantity]
+        tracked = next((item for item in tracked_positions(state) if item.get("symbol") == symbol), {})
+        if len(stops) == 1 and len(matching_stops) == 1:
+            stop = stops[0]
+            tracked["protective_stop_order_id"] = stop.get("id")
+            tracked["stop_price"] = float(stop.get("stop_price", tracked.get("stop_price", 0.0)) or 0.0)
+            tracked["stop_quantity"] = quantity
+            continue
+
+        had_repair = True
+        existing_stop_prices = [float(order.get("stop_price", 0) or 0) for order in stops if order.get("stop_price")]
+        tracked_stop = float(tracked.get("stop_price", 0.0) or position.get("stop_price", 0.0) or 0.0)
+        stop_price = max(existing_stop_prices + ([tracked_stop] if tracked_stop > 0 else []), default=0.0)
+        state["status"] = "paused"
+        state["paused_reason"] = "protective_stop_reconciliation_required"
+        repair_reason = "missing_stop" if not stops else "split_or_wrong_quantity_stop"
+        if stop_price <= 0:
+            actions.append(
+                {
+                    "type": "protective_stop_repair_blocked",
+                    "reason": "missing_stop_price",
+                    "symbol": symbol,
+                    "quantity": quantity,
+                    "quantity_scope": "full_position",
+                    "cancel_existing_symbol_stops_first": bool(stops),
+                    "cancel_existing_order_ids": [order.get("id") for order in stops if order.get("id")],
+                }
+            )
+            events.append(
+                event(
+                    "protective_stop_repair_blocked",
+                    "Protective stop repair is blocked until a valid stop price is available.",
+                    symbol=symbol,
+                    quantity=quantity,
+                    open_stop_count=len(stops),
+                    reason="missing_stop_price",
+                )
+            )
+            continue
+        actions.append(
+            {
+                "type": "place_protective_stop",
+                "reason": repair_reason,
+                "symbol": symbol,
+                "side": "sell",
+                "quantity": quantity,
+                "quantity_scope": "full_position",
+                "consolidate_by_symbol": True,
+                "cancel_existing_symbol_stops_first": True,
+                "cancel_existing_order_ids": [order.get("id") for order in stops if order.get("id")],
+                "order_type": config["execution"]["protective_stop_order_type"],
+                "stop_price": round(stop_price, 2),
+                "time_in_force": config["execution"]["protective_stop_time_in_force"],
+            }
+        )
+        events.append(
+            event(
+                "protective_stop_repair_required",
+                "Protective stop must be repaired before new buys.",
+                symbol=symbol,
+                quantity=quantity,
+                open_stop_count=len(stops),
+                stop_price=round(stop_price, 2),
+                reason=repair_reason,
+            )
+        )
+
+    if not had_repair and state.get("paused_reason") == "protective_stop_reconciliation_required":
+        state["status"] = "active"
+        state["paused_reason"] = None
+        events.append(event("protective_stop_reconciliation_clear", "Protective stops verified; pause cleared."))
+    return events, actions
 
 
 def proposed_ratchet_stop(position: dict[str, Any], price: float, config: dict[str, Any]) -> tuple[float | None, str | None]:
@@ -522,6 +648,10 @@ def monitor_pending_candidates(
     group_counts = open_group_counts(state, account, config)
     max_group_count = max_positions_per_group(account, config)
     remaining_risk = remaining_open_risk_dollars(state, account, config)
+    equity = float(account.get("equity", account.get("account_value", 0.0)) or 0.0)
+    buying_power = float(account.get("buying_power", account.get("cash", 0.0)) or 0.0)
+    min_cash_reserve = equity * (float(config["risk"].get("min_cash_reserve_pct", 0.0)) / 100.0)
+    max_position_value = equity * (float(config["risk"]["max_position_pct"]) / 100.0)
     for candidate in state.get("pending_candidates", []):
         symbol = candidate["symbol"]
         is_held_symbol = symbol in held_symbols
@@ -552,6 +682,42 @@ def monitor_pending_candidates(
         if live_price > float(candidate["max_next_session_entry"]):
             events.append(event("candidate_gap_skip", "Candidate skipped above max entry.", symbol=symbol, live_price=live_price))
             continue
+        candidate_cost = int(candidate.get("shares", 0)) * live_price
+        if buying_power - candidate_cost < min_cash_reserve:
+            events.append(
+                event(
+                    "candidate_cash_reserve_skip",
+                    "Candidate skipped because it would breach the cash reserve.",
+                    symbol=symbol,
+                    estimated_cost=round(candidate_cost, 2),
+                    required_cash_reserve=round(min_cash_reserve, 2),
+                )
+            )
+            continue
+        if candidate_cost > max_position_value:
+            events.append(
+                event(
+                    "candidate_position_exposure_skip",
+                    "Candidate skipped because order value exceeds max position exposure.",
+                    symbol=symbol,
+                    estimated_cost=round(candidate_cost, 2),
+                    max_position_value=round(max_position_value, 2),
+                )
+            )
+            continue
+        if is_held_symbol:
+            aggregate_value = account_position_value(account, symbol, live_price) + candidate_cost
+            if aggregate_value > max_position_value:
+                events.append(
+                    event(
+                        "candidate_add_on_exposure_skip",
+                        "Held-symbol add-on skipped because aggregate symbol exposure would exceed cap.",
+                        symbol=symbol,
+                        aggregate_value=round(aggregate_value, 2),
+                        max_position_value=round(max_position_value, 2),
+                    )
+                )
+                continue
         if is_option_candidate(candidate):
             if not option_trading_enabled(config):
                 events.append(event("option_trading_disabled", "Option candidate skipped because option trading is disabled.", symbol=symbol))
@@ -1012,6 +1178,82 @@ def build_trade_audit_note(event_item: dict[str, Any], actions: list[dict[str, A
     return f"{event_item['kind']}: {event_item['message']} | actions={len(actions)}"
 
 
+def ledger_records(events: list[dict[str, Any]], actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for action in actions:
+        action_type = action.get("type")
+        if action_type == "review_and_place_equity_buy":
+            records.append(
+                {
+                    "time": now_iso(),
+                    "record_type": "candidate_planned",
+                    "symbol": action.get("symbol"),
+                    "setup_type": action.get("setup_type"),
+                    "entry": action.get("limit_price"),
+                    "shares": action.get("quantity"),
+                    "estimated_cost": action.get("estimated_cost"),
+                    "estimated_max_loss": action.get("estimated_max_loss"),
+                    "reward_risk_ratio": action.get("reward_risk_ratio"),
+                    "sector_group": action.get("sector_group"),
+                    "target": (action.get("after_fill") or {}).get("target_price"),
+                    "partial_target": (action.get("after_fill") or {}).get("partial_target"),
+                }
+            )
+        elif action_type == "place_protective_stop":
+            records.append(
+                {
+                    "time": now_iso(),
+                    "record_type": "protective_stop_action",
+                    "symbol": action.get("symbol"),
+                    "shares": action.get("quantity"),
+                    "stop": action.get("stop_price"),
+                    "reason": action.get("reason"),
+                }
+            )
+    for item in events:
+        kind = item.get("kind")
+        details = item.get("details", {})
+        if kind == "buy_filled":
+            records.append(
+                {
+                    "time": item.get("time"),
+                    "record_type": "buy_fill",
+                    "symbol": details.get("symbol"),
+                    "shares": details.get("quantity"),
+                    "entry": details.get("entry"),
+                }
+            )
+        elif kind in {"position_closed", "position_reduced"}:
+            records.append(
+                {
+                    "time": item.get("time"),
+                    "record_type": "exit_event",
+                    "symbol": details.get("symbol"),
+                    "remaining": details.get("remaining"),
+                    "exit_reason": kind,
+                }
+            )
+        elif kind.startswith("candidate_") and kind.endswith("_skip"):
+            records.append(
+                {
+                    "time": item.get("time"),
+                    "record_type": "candidate_rejected",
+                    "symbol": details.get("symbol"),
+                    "rejection_reason": kind,
+                }
+            )
+    return [record for record in records if record.get("symbol")]
+
+
+def append_trade_ledger(path: Path, records: list[dict[str, Any]]) -> None:
+    if not records:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
 def build_daily_brief(
     state: dict[str, Any],
     account: dict[str, Any],
@@ -1058,11 +1300,15 @@ def run_monitor(
     events: list[dict[str, Any]] = []
     actions: list[dict[str, Any]] = []
 
+    sync_authorization_scope(state, config)
     state["pending_candidates"] = candidates
     events.extend(reset_daily_counters(state, account, trading_date))
     events.extend(reconcile_account(state, account, orders))
     events.extend(detect_manual_activity(state, account, orders))
     events.extend(daily_loss_guard(state, account, config))
+    repair_events, repair_actions = reconcile_protective_stops(state, account, config)
+    events.extend(repair_events)
+    actions.extend(repair_actions)
 
     watched_symbols = []
     for position in tracked_positions(state):
@@ -1077,7 +1323,9 @@ def run_monitor(
     watched_symbols.extend([config["strategy"]["benchmark_symbol"], "VIX"])
     live_quotes = fetch_live_quotes(sorted(set(watched_symbols)), quotes)
 
-    if mode == "pending":
+    if repair_actions:
+        pass
+    elif mode == "pending":
         new_events, new_actions = monitor_pending_candidates(state, account, live_quotes, config)
         events.extend(new_events)
         actions.extend(new_actions)
@@ -1128,6 +1376,8 @@ def main() -> int:
     parser.add_argument("--trading-date", default=datetime.now().date().isoformat())
     parser.add_argument("--tasks-json", default="work/agentic_tasks.json")
     parser.add_argument("--tasks-md", default="work/agentic_tasks.md")
+    parser.add_argument("--ledger-jsonl", default="work/agentic_trade_ledger.jsonl")
+    parser.add_argument("--no-ledger", action="store_true")
     parser.add_argument("--no-save", action="store_true")
     args = parser.parse_args()
 
@@ -1147,6 +1397,8 @@ def main() -> int:
     if not args.no_save:
         save_state(state_path, result.state)
         agentic_task_queue.save_task_files(Path(args.tasks_json), Path(args.tasks_md), result.state.get("agentic_tasks", []))
+        if not args.no_ledger:
+            append_trade_ledger(Path(args.ledger_jsonl), ledger_records(result.events, result.actions))
 
     print(
         json.dumps(

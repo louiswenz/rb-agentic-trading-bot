@@ -7,6 +7,8 @@ The monitor also derives an operational task queue from broker snapshots and loc
 - Machine-readable queue: `work/agentic_tasks.json`
 - Human-readable queue: `work/agentic_tasks.md`
 
+For local state stamps that are not already saved by `agentic_monitor.py`, use `outputs/update_agentic_state.py` instead of inline `python3 -c` snippets. This keeps heartbeat permissions scoped to a repo-local helper while still writing only `work/agentic_live_adapter_state.json`.
+
 ## Standing Authorization
 
 Live automation is authorized only within these hard caps:
@@ -117,7 +119,7 @@ When available, include `days_until_earnings`, `next_earnings_date`, or `earning
 - `sector_relative_pullback`: the sector is holding up versus SPY while the stock has temporarily lagged the sector and is reclaiming support.
 - `quality_range_reversion`: a liquid large-cap or ETF-style symbol has pulled back inside a broad uptrend and shows a bullish reversal near range support.
 
-After setup evaluation, all candidates still pass the shared news, reward/risk, buying-power, position-size, max-loss, and live-price validation layers. When `strategy.sector_relative_momentum.enabled=true`, the scanner loads the configured sector proxy CSVs from `work/agentic_price_history`, applies sector-relative inputs to relevant setup engines, and adds the configured sector-relative score weight to candidate ranking. If a proxy history file is missing, the symbol can still be evaluated by ordinary rules, but no sector-relative setup or rank boost is applied.
+After setup evaluation, all candidates still pass the shared news, reward/risk, buying-power, cash-reserve, position-size, liquidity, max-loss, and live-price validation layers. Broker positions and open orders must be supplied to the scanner when available so held-symbol add-ons are capped by aggregate post-trade symbol exposure, not only by the incremental order size. When `strategy.sector_relative_momentum.enabled=true`, the scanner loads the configured sector proxy CSVs from `work/agentic_price_history`, applies sector-relative inputs to relevant setup engines, and adds the configured sector-relative score weight to candidate ranking. If a proxy history file is missing, the symbol can still be evaluated by ordinary rules, but no sector-relative setup or rank boost is applied.
 
 ### Option Candidate Enrichment
 
@@ -170,7 +172,7 @@ python3 outputs/robinhood_historicals_to_prices.py \
 
 5. Run `swing_strategy.py --prices-dir work/agentic_price_history ...`.
 
-Both converters write only scanner OHLCV columns and skip any symbol with fewer than the configured minimum real daily bars. If a symbol's technical history is still missing or stale after the public refresh and broker fallback, mark that symbol ineligible and report the data condition; do not silently skip it. If benchmark or market-regime history is missing or stale, create no new-buy candidates because market context is required.
+Both converters write only scanner OHLCV columns and skip any symbol with fewer than the configured minimum real daily bars. If a symbol's technical history is still missing or stale after the public refresh and broker fallback, mark that symbol ineligible and report the data condition; do not silently skip it. SPY/QQQ/VIX remain context and ranking inputs when `strategy.market_regime_filter.enabled=false`; missing benchmark data should block only calculations that directly require that benchmark, not all new-buy candidates.
 
 ### Monitor Phase
 
@@ -207,12 +209,15 @@ The task queue is derived from current account/order/quote snapshots. It is not 
 
 Any task with `status=risk` is a monitor event and should be surfaced under the normal notification policy.
 
+Before evaluating pending buys, stop ratchets, profit targets, or option exits, reconcile local state from current broker positions and open orders. Broker state is authoritative for current quantity, open stop IDs, buying power, and whether a candidate is still eligible. If local state disagrees with broker state, update local state from the broker snapshot before making a trading decision.
+
 ### Execution Phase
 
 For each action:
 
 - `review_and_place_equity_buy`
   - Call `review_equity_order`.
+  - Confirm the order will not breach the configured cash reserve, total open-risk cap, max position exposure, or add-on aggregate exposure cap.
   - If broker review passes without blocking alerts, call `place_equity_order`.
   - Use a fresh idempotency `ref_id`.
   - On fill, call `handle_buy_fill` through the monitor flow, then place the protective stop.
@@ -235,12 +240,17 @@ For each action:
 
 - `place_protective_stop`
   - If `execution.consolidate_protective_stops_by_symbol=true`, maintain exactly one open broker-side protective stop per equity symbol.
+  - The stop quantity must match the full current broker position quantity, not only the latest fill quantity.
   - For an add-on fill, resolve all open stop-market sell orders for that symbol, cancel them, then place one replacement GTC stop-market sell for the full current broker position quantity.
   - Use the proposed stop price unless that would lower an existing stop; when consolidating existing stops, preserve the highest current stop price or the proposed stop price, whichever is higher.
   - Call `review_equity_order` with `side=sell`, `type=stop_market`, `stop_price`, and `time_in_force=gtc`.
   - If accepted, call `place_equity_order`.
   - Save the single consolidated stop order ID in private state.
   - If rejected, pause new buys and notify immediately.
+
+### Trade Ledger
+
+Append trade lifecycle records to `work/agentic_trade_ledger.jsonl`. The ledger is the source for strategy feedback, not chat history. Do not write full account numbers, raw broker account objects, or sensitive identifiers. Include symbol, setup type, entry, stop, target, shares, score, news score, fills, exits, realized P/L, R multiple, and candidate rejection reason when available. Weekly reviews should summarize win rate, average win/loss, expectancy by setup type, and loss cause.
 
 - `cancel_or_reduce_protective_stop`
   - Resolve current protective stop order ID from state or open orders.
