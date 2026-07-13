@@ -25,6 +25,43 @@ from agentic_monitor import (
 from broker_adapters import MockBrokerAdapter, RobinhoodAdapter
 
 
+SENSITIVE_OUTPUT_KEYS = {
+    "account_id",
+    "account_number",
+    "agentic_account_number",
+    "cancel_existing_order_ids",
+    "id",
+    "last_equity_order_ids",
+    "last_ref_ids",
+    "order_id",
+    "order_ids",
+    "profit_order_id",
+    "protective_stop_order_id",
+    "ref_id",
+    "ref_ids",
+}
+
+
+def sanitize_for_output(value: Any) -> Any:
+    """Redact broker/account identifiers from console JSON."""
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if key.lower() in SENSITIVE_OUTPUT_KEYS:
+                if isinstance(item, list):
+                    redacted[key] = f"[REDACTED_LIST:{len(item)}]"
+                elif item is None:
+                    redacted[key] = None
+                else:
+                    redacted[key] = "[REDACTED]"
+            else:
+                redacted[key] = sanitize_for_output(item)
+        return redacted
+    if isinstance(value, list):
+        return [sanitize_for_output(item) for item in value]
+    return value
+
+
 def watched_symbols(state: dict[str, Any], candidates: list[dict[str, Any]], config: dict[str, Any]) -> list[str]:
     symbols = [config["strategy"]["benchmark_symbol"], "VIX"]
     if state.get("position"):
@@ -141,7 +178,7 @@ def main() -> int:
     while True:
         payload = run_once(args)
         outputs.append(payload)
-        print(json.dumps(payload, indent=2))
+        print(json.dumps(sanitize_for_output(payload), indent=2))
         iterations += 1
         if not args.loop or iterations >= args.max_iterations:
             break
