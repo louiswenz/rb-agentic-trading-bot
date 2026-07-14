@@ -29,7 +29,7 @@ Workflow:
 11. Execute only returned actions allowed by hard caps through Robinhood review/place/cancel tools.
    - For equity protective stops, maintain exactly one open broker-side stop per symbol when `execution.consolidate_protective_stops_by_symbol=true`. On add-on fills or stop ratchets, cancel existing symbol stops first, then place one full-position GTC stop at the highest allowed stop price.
 12. Save updated state. For local state stamps that are not already persisted by `agentic_monitor.py`, use `outputs/update_agentic_state.py` instead of inline `python3 -c` snippets.
-13. Notify only on events.
+13. Notify after every live monitor run, even when there are no actions or meaningful events. Keep the no-action update concise and include the live-monitor slot, account status, active positions, protective-stop status, pending candidates count, and next scheduled check. Candidate-only scans may stay quiet unless they stage candidates, hit a data/tool/risk condition, or otherwise need attention.
 
 Schedule behavior:
 
@@ -40,7 +40,7 @@ Schedule behavior:
 - Regular market window: 6:30 AM to 1:00 PM PT, Monday through Friday, excluding market holidays.
 - Current single-heartbeat envelope: weekdays at 6:00, 7:00, 8:00, 9:00, 10:00, 11:00, 12:00, 1:00, and 5:00 PT.
 - Normal heartbeat inside market window: 1 hour.
-- Elevated states: keep the 1-hour heartbeat when an order is active, first 30 minutes after entry, or price is within 1% of stop/target; notify only on meaningful state changes.
+- Elevated states: keep the 1-hour heartbeat when an order is active, first 30 minutes after entry, or price is within 1% of stop/target; live monitor runs still notify every time, with extra detail only on meaningful state changes.
 - Morning validation: at or after 7:00 AM PT.
 - Intraday rediscovery: at or after 10:00 AM PT, only if the twice-daily scanner has not already recorded the current 10:00 AM scan.
 - Daily after-close candidate scan: 5:00 PM PT weekdays, candidate-only.

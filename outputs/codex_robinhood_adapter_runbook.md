@@ -287,16 +287,18 @@ Use one thread heartbeat for the live orchestrator:
 - Regular market window: 6:30 AM to 1:00 PM PT, Monday through Friday, excluding market holidays.
 - Current single-heartbeat envelope: weekdays at 6:00, 7:00, 8:00, 9:00, 10:00, 11:00, 12:00, 1:00, and 5:00 PT. The 6:00 and 5:00 runs are candidate-only; the 10:00 run may combine live monitoring and candidate rediscovery if the slot has not already been recorded.
 - Normal cadence: every 1 hour during the regular market window when a position is open or pending candidate requires validation.
-- Elevated states: keep the 1-hour heartbeat when an order is active, first 30 minutes after entry, or price is within 1% of stop/target; notify only on meaningful state changes.
+- Elevated states: keep the 1-hour heartbeat when an order is active, first 30 minutes after entry, or price is within 1% of stop/target; live monitor runs still notify every time, with extra detail only on meaningful state changes.
 - Morning validation: run at or after 7:00 AM PT / 10:00 AM ET when a pending candidate exists.
 - After-close scan/brief: 5:00 PM PT weekdays, candidate-only. It may refresh history and update pending candidates for the next session, but it must not place, cancel, or modify broker orders.
 - Outside market windows: no-op unless an order/position risk event is unresolved.
 
 The orchestrator should keep the heartbeat cadence at 1 hour. Do not request a one-minute or 15-minute cadence unless the user explicitly changes the schedule; elevated states are handled by the same hourly market-hours run plus event notifications.
 
+Every live monitor run must send a concise chat status, even when there are no actions or meaningful events. The no-action status should include the slot, account status, active positions, protective-stop status, pending candidates count, and next scheduled check. Candidate-only scans may stay quiet unless they stage candidates, hit a data/tool/risk condition, or otherwise need attention.
+
 ## Notifications
 
-Notify only on events:
+Always notify after every live monitor run, including ok/no-action checks. In addition, notify on these events:
 
 - Candidate skipped or actionable.
 - Buy submitted, filled, rejected, canceled, or partially filled.
