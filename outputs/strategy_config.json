@@ -152,6 +152,14 @@
       "sector_relative_pullback": 1.15,
       "quality_range_reversion": 0.95
     },
+    "usable_position_size_rank": {
+      "enabled": true,
+      "rank_weight": 2.0,
+      "target_shares": 5,
+      "target_position_pct": 20.0,
+      "share_count_weight": 0.65,
+      "position_value_weight": 0.35
+    },
     "setup_exit_profiles": {
       "momentum_breakout": {
         "partial_profit_r_multiple": 1.0,

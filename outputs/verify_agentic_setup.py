@@ -304,8 +304,8 @@ def main() -> int:
             live_auto["status"],
         ),
         check(
-            "live_automation_hourly_heartbeat",
-            live_auto["kind"] == "heartbeat"
+            "live_automation_hourly_cron",
+            live_auto["kind"] == "cron"
             and "FREQ=WEEKLY" in live_rrule
             and "BYDAY=MO,TU,WE,TH,FR" in live_rrule
             and "BYHOUR=6,7,8,9,10,11,12,13,17" in live_rrule

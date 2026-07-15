@@ -64,6 +64,8 @@ class Candidate:
     stop_method: str
     news_score: float
     combined_rank_score: float
+    signal_rank_score: float
+    usable_size_rank_score: float
     news_summary: str
     reason: str
     exit_plan: str
@@ -384,6 +386,29 @@ def setup_exit_multiples(setup_type: str, config: dict[str, Any]) -> tuple[float
 
 def setup_weight(setup_type: str, config: dict[str, Any]) -> float:
     return float(config["strategy"].get("setup_rank_weights", {}).get(setup_type, 1.0))
+
+
+def usable_position_size_score(shares: int, position_value: float, account_value: float, config: dict[str, Any]) -> float:
+    """Return a bounded rank bonus for candidates that can deploy meaningful size."""
+    rank_config = config["strategy"].get("usable_position_size_rank", {})
+    if not rank_config.get("enabled", False):
+        return 0.0
+    if shares <= 0 or position_value <= 0 or account_value <= 0:
+        return 0.0
+
+    target_shares = max(1.0, float(rank_config.get("target_shares", 5)))
+    target_position_pct = max(0.01, float(rank_config.get("target_position_pct", 20.0)))
+    target_position_value = account_value * (target_position_pct / 100.0)
+    share_count_weight = float(rank_config.get("share_count_weight", 0.65))
+    position_value_weight = float(rank_config.get("position_value_weight", 0.35))
+    weight_total = share_count_weight + position_value_weight
+    if weight_total <= 0:
+        return 0.0
+
+    share_component = min(shares / target_shares, 1.0)
+    value_component = min(position_value / target_position_value, 1.0)
+    normalized = ((share_component * share_count_weight) + (value_component * position_value_weight)) / weight_total
+    return normalized * float(rank_config.get("rank_weight", 2.0))
 
 
 def setup_enabled(setup_type: str, config: dict[str, Any]) -> bool:
@@ -1012,13 +1037,15 @@ def scan_symbol(
     sector_weight = float(sector_config.get("rank_weight", 0.0)) if sector_config.get("enabled", False) else 0.0
     sector_score = sector_rs if sector_rs is not None else 0.0
     sector_momentum_score = sector_momentum - spy_return if sector_momentum is not None else 0.0
-    combined_rank_score = (
+    signal_rank_score = (
         setup_signal.score * setup_weight(setup_signal.setup_type, config)
         + (relative_strength * 0.35)
         + (sector_score * sector_weight)
         + (sector_momentum_score * sector_weight * 0.5)
         + (news_score * news_weight)
     )
+    usable_size_rank_score = usable_position_size_score(shares, position_value, account_value, config)
+    combined_rank_score = signal_rank_score + usable_size_rank_score
 
     reason = setup_signal.reason
     if sector_rs is not None:
@@ -1031,6 +1058,8 @@ def scan_symbol(
         reason = f"{reason}; volume {latest_volume_ratio:.2f}x 20-day average"
     if strategy.get("news_filter", {}).get("enabled", False):
         reason = f"{reason}; news score {news_score:g} ({news_summary})"
+    if usable_size_rank_score:
+        reason = f"{reason}; usable size rank bonus {usable_size_rank_score:.2f}"
     exit_plan = (
         f"initial {stop_method} stop {stop:.2f}; consider partial profit at "
             f"{partial_target:.2f} ({setup_signal.partial_target_r_multiple:g}R); target {profit_target:.2f} "
@@ -1060,6 +1089,8 @@ def scan_symbol(
         stop_method=stop_method,
         news_score=news_score,
         combined_rank_score=combined_rank_score,
+        signal_rank_score=signal_rank_score,
+        usable_size_rank_score=usable_size_rank_score,
         news_summary=news_summary,
         reason=reason,
         exit_plan=exit_plan,
@@ -1223,6 +1254,9 @@ def revalidate_candidate(
     reward_risk_ratio = (profit_target - live_price) / (live_price - candidate.stop)
     if reward_risk_ratio < float(config["strategy"]["min_reward_risk_ratio"]):
         return None
+    signal_rank_score = candidate.combined_rank_score - candidate.usable_size_rank_score
+    usable_size_rank_score = usable_position_size_score(shares, position_value, account_value, config)
+    combined_rank_score = signal_rank_score + usable_size_rank_score
 
     exit_plan = (
         f"initial stop {candidate.stop:.2f}; consider partial profit at "
@@ -1253,7 +1287,9 @@ def revalidate_candidate(
         atr=candidate.atr,
         stop_method=candidate.stop_method,
         news_score=candidate.news_score,
-        combined_rank_score=candidate.combined_rank_score,
+        combined_rank_score=combined_rank_score,
+        signal_rank_score=signal_rank_score,
+        usable_size_rank_score=usable_size_rank_score,
         news_summary=candidate.news_summary,
         reason=f"{candidate.reason}; next-session live price validated",
         exit_plan=exit_plan,
@@ -1518,6 +1554,8 @@ def main() -> int:
             "stop_method": item.stop_method,
             "news_score": round(item.news_score, 2),
             "news_summary": item.news_summary,
+            "signal_rank_score": round(item.signal_rank_score, 2),
+            "usable_size_rank_score": round(item.usable_size_rank_score, 2),
             "combined_rank_score": round(item.combined_rank_score, 2),
             "exit_plan": item.exit_plan,
             "order_instruction": "Use a regular-hours limit order at or below max_next_session_entry after broker review.",

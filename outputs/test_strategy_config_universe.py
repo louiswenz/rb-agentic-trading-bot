@@ -24,6 +24,7 @@ def load_config() -> dict:
 class StrategyConfigUniverseTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = load_config()
+        self.config["strategy"]["min_average_dollar_volume"] = 0.0
         self.stock_bars, self.spy_bars = make_bars()
 
     def test_expanded_universe_contains_diverse_lower_priced_names(self) -> None:

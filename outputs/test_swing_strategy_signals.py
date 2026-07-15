@@ -78,6 +78,57 @@ class SwingStrategySignalTests(unittest.TestCase):
 
         self.assertEqual((shares, position_value, max_loss), (0, 0.0, 0.0))
 
+    def test_usable_position_size_rank_rewards_larger_deployable_size(self) -> None:
+        config = deepcopy(self.config)
+        config["strategy"]["usable_position_size_rank"] = {
+            "enabled": True,
+            "rank_weight": 2.0,
+            "target_shares": 5,
+            "target_position_pct": 20.0,
+            "share_count_weight": 0.65,
+            "position_value_weight": 0.35,
+        }
+
+        small_score = scanner.usable_position_size_score(1, 350.0, 7000.0, config)
+        larger_score = scanner.usable_position_size_score(5, 700.0, 7000.0, config)
+
+        self.assertGreater(larger_score, small_score)
+        self.assertLessEqual(larger_score, 2.0)
+
+    def test_candidate_rank_includes_usable_position_size_bonus(self) -> None:
+        config = deepcopy(self.config)
+        stock_bars, spy_bars = make_bars()
+
+        enabled_candidate = scanner.scan_symbol(
+            "AMD",
+            stock_bars,
+            spy_bars,
+            account_value=7000.0,
+            settled_cash=3000.0,
+            config=config,
+            news_snapshot={},
+        )
+
+        disabled_config = deepcopy(config)
+        disabled_config["strategy"]["usable_position_size_rank"]["enabled"] = False
+        disabled_candidate = scanner.scan_symbol(
+            "AMD",
+            stock_bars,
+            spy_bars,
+            account_value=7000.0,
+            settled_cash=3000.0,
+            config=disabled_config,
+            news_snapshot={},
+        )
+
+        self.assertIsNotNone(enabled_candidate)
+        self.assertIsNotNone(disabled_candidate)
+        assert enabled_candidate is not None
+        assert disabled_candidate is not None
+        self.assertGreater(enabled_candidate.usable_size_rank_score, 0.0)
+        self.assertGreater(enabled_candidate.combined_rank_score, enabled_candidate.signal_rank_score)
+        self.assertEqual(disabled_candidate.usable_size_rank_score, 0.0)
+
     def test_minimum_stock_dollar_volume_filters_illiquid_symbols(self) -> None:
         config = deepcopy(self.config)
         config["strategy"]["min_average_dollar_volume"] = 100_000_000.0
